@@ -6,10 +6,20 @@
 
     <depends>com.intellij.modules.platform</depends>
 
-    <resource-bundle>messages.MyBundle</resource-bundle>
-
     <extensions defaultExtensionNs="com.intellij">
-        <toolWindow factoryClass="com.github.zuperzv.mcodeminecraft.toolWindow.MyToolWindowFactory" id="MyToolWindow"/>
-        <postStartupActivity implementation="com.github.zuperzv.mcodeminecraft.startup.MyProjectActivity" />
+        <toolWindow
+                id="Block Model Viewer"
+                factoryClass="com.github.zuperzv.mcodeminecraft.toolWindow.ModelViewerToolWindowFactory"
+                anchor="right"/>
     </extensions>
+
+    <actions>
+        <action
+                id="PreviewMinecraftModel"
+                class="com.github.zuperzv.mcodeminecraft.actions.PreviewModelAction"
+                text="Preview Minecraft Model">
+            <add-to-group group-id="ProjectViewPopupMenu"/>
+        </action>
+    </actions>
+
 </idea-plugin>
