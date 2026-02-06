@@ -11,6 +11,9 @@ import com.intellij.ui.jcef.JBCefBrowser
 class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
+
+        project.getService(com.github.zuperzv.mcodeminecraft.preview.ModelAutoPreviewService::class.java)
+
         val browser = JBCefBrowser()
         project.getService(ModelViewerService::class.java).setBrowser(browser)
 
@@ -19,7 +22,10 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         toolWindow.contentManager.addContent(content)
 
         browser.loadHTML(viewerHtml())
+
+        println("ModelViewerToolWindow CREATED")
     }
+
 
     private fun viewerHtml() = """
     <html>
