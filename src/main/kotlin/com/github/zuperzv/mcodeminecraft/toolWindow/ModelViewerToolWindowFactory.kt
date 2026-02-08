@@ -70,21 +70,23 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             }
         }
 
-        function rotateUV(coords, rotation) {
+        function rotateUVScalar(u, v, rotation) {
             rotation = ((rotation||0)%360 + 360)%360;
             switch(rotation) {
                 case 90:
-                    return [coords[3], coords[0], coords[1], coords[2]];
+                    return [v, 1 - u];
                 case 180:
-                    return [coords[2], coords[3], coords[0], coords[1]];
+                    return [1 - u, 1 - v];
                 case 270:
-                    return [coords[1], coords[2], coords[3], coords[0]];
+                    return [1 - v, u];
                 default: // 0
-                    return coords;
+                    return [u, v];
             }
         }
 
         const loader = new THREE.TextureLoader()
+        const DEBUG_UV = true
+        const modelCache = {}
         let textures = {}
 
         function resolveTexture(texString){
@@ -96,29 +98,111 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             return "http://localhost:$assetPort/assets/minecraft/textures/" + texString + ".png"
         }
 
+        function resolveModelUrl(parentRef){
+            let namespace = "minecraft"
+            let path = parentRef
+            if(parentRef.includes(":")){
+                const parts = parentRef.split(":")
+                namespace = parts[0]
+                path = parts[1]
+            }
+            return "http://localhost:$assetPort/assets/" + namespace + "/models/" + path + ".json"
+        }
+
+        async function fetchModel(parentRef){
+            const url = resolveModelUrl(parentRef)
+            if(modelCache[url]) return modelCache[url]
+            modelCache[url] = fetch(url).then(r => {
+                if(!r.ok){
+                    throw new Error("Failed to load model: " + url)
+                }
+                return r.json()
+            })
+            return modelCache[url]
+        }
+
+        async function resolveModel(model, depth=0){
+            if(!model || !model.parent || depth > 10){
+                return model
+            }
+            try{
+                let parent = await fetchModel(model.parent)
+                parent = await resolveModel(parent, depth + 1)
+                return {
+                    ...parent,
+                    ...model,
+                    textures: { ...(parent.textures || {}), ...(model.textures || {}) },
+                    elements: model.elements ?? parent.elements
+                }
+            }catch(e){
+                console.warn("Parent model load failed:", model.parent, e)
+                return model
+            }
+        }
+
+        function resolveTextureRef(ref, texMap, depth=0){
+            if(!ref || depth > 10) return null
+            if(!ref.startsWith("#")) return ref
+            const key = ref.slice(1)
+            const next = texMap?.[key]
+            return resolveTextureRef(next, texMap, depth + 1)
+        }
+
+        function getTextureForRef(texRef){
+            if(!texRef) return null
+            const cacheKey = texRef
+            if(!textures[cacheKey]){
+                const texPath = resolveTexture(texRef)
+                textures[cacheKey] = loader.load(
+                    texPath,
+                    ()=>console.log("Texture loaded:", texPath),
+                    undefined,
+                    e=>console.error("Texture failed:", texPath, e)
+                )
+                textures[cacheKey].magFilter = THREE.NearestFilter
+                textures[cacheKey].minFilter = THREE.NearestFilter
+            }
+            return textures[cacheKey]
+        }
+
         function applyFaceUV(geometry, faceIndex, uv, texW=16, texH=16, rotation=0, faceName="") {
             if (!uv) return;
         
             let [u1,v1,u2,v2] = uv;
-            u1/=texW; v1/=texH; u2/=texW; v2/=texH;
-        
-            // Lav standard coords
-            let coords = [[u2,1-v2],[u1,1-v2],[u1,1-v1],[u2,1-v1]];
-        
-            // Roter coords efter rotation
-            coords = rotateUV(coords, rotation);
-        
-            // Spejling for visse faces
-            if(faceName === "west" || faceName === "north"){
-                coords = coords.map(c => [1-c[0], c[1]]);
+            const uMin = Math.min(u1, u2) / texW;
+            const uMax = Math.max(u1, u2) / texW;
+            const vMin = Math.min(v1, v2) / texH;
+            const vMax = Math.max(v1, v2) / texH;
+            let uStart = uMin;
+            let uEnd = uMax;
+            let vTop = 1 - vMin;
+            let vBottom = 1 - vMax;
+            if (u1 > u2) {
+                const t = uStart; uStart = uEnd; uEnd = t;
+            }
+            if (v1 > v2) {
+                const t = vTop; vTop = vBottom; vBottom = t;
             }
         
             const uvAttr = geometry.attributes.uv;
-            const idx = faceIndex*4;
-            uvAttr.setXY(idx+0, coords[0][0], coords[0][1]);
-            uvAttr.setXY(idx+1, coords[1][0], coords[1][1]);
-            uvAttr.setXY(idx+2, coords[2][0], coords[2][1]);
-            uvAttr.setXY(idx+3, coords[3][0], coords[3][1]);
+            const indexed = !!geometry.index;
+            const idxBase = indexed ? faceIndex * 4 : faceIndex * 6;
+            const count = indexed ? 4 : 6;
+            if(DEBUG_UV){
+                console.log("[UV] face", faceName, "idx", faceIndex, "uv", uv, "tex", texW, texH, "rot", rotation, "indexed", indexed, "uvCount", uvAttr?.count)
+                console.log("[UV] ranges", "u", uStart, uEnd, "v", vBottom, vTop)
+            }
+            for(let i=0;i<count;i++){
+                const oldU = uvAttr.getX(idxBase + i);
+                const oldV = uvAttr.getY(idxBase + i);
+                const rotated = rotateUVScalar(oldU, oldV, rotation);
+                const newU = uStart + rotated[0] * (uEnd - uStart);
+                const newV = vBottom + rotated[1] * (vTop - vBottom);
+                if(DEBUG_UV){
+                    console.log("[UV] v", i, "old", oldU, oldV, "rot", rotated[0], rotated[1], "new", newU, newV)
+                }
+                uvAttr.setXY(idxBase + i, newU, newV);
+            }
             uvAttr.needsUpdate = true;
         }
 
@@ -126,39 +210,43 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
 
         window.pendingModelJson = null
 
-        window.loadModel = function(model){
+        window.loadModel = async function(model){
             clearScene()
             textures = {}
 
-            if(model.textures){
-                Object.keys(model.textures).forEach(key=>{
-                    const texPath = resolveTexture(model.textures[key])
-                    textures[key] = loader.load(texPath,
-                      ()=>console.log("Texture loaded:", texPath),
-                      undefined,
-                      e=>console.error("Texture failed:", texPath,e)
-                    )
-                    textures[key].magFilter = THREE.NearestFilter
-                    textures[key].minFilter = THREE.NearestFilter
+            const resolvedModel = await resolveModel(model)
+
+            if(resolvedModel.textures){
+                Object.keys(resolvedModel.textures).forEach(key=>{
+                    const texRef = resolveTextureRef(resolvedModel.textures[key], resolvedModel.textures)
+                    if(texRef){
+                        textures[key] = getTextureForRef(texRef)
+                    }
                 })
             }
 
             const center = new THREE.Vector3(8,8,8)
 
-            model.elements?.forEach(el=>{
+            resolvedModel.elements?.forEach(el=>{
                 const sx = el.to[0]-el.from[0]
                 const sy = el.to[1]-el.from[1]
                 const sz = el.to[2]-el.from[2]
 
                 const geometry = new THREE.BoxGeometry(sx,sy,sz)
+                console.log("[Geom] indexed", !!geometry.index, "uvCount", geometry.attributes?.uv?.count, "posCount", geometry.attributes?.position?.count)
                 const materials = []
                 const faceOrder=["east","west","up","down","south","north"]
 
                 faceOrder.forEach((face,i)=>{
                     const faceDef = el.faces?.[face]
                     if(faceDef && faceDef.texture){
-                        const texKey = faceDef.texture.replace("#","")
-                        const tex = textures[texKey]
+                        let tex = null
+                        if(faceDef.texture.startsWith("#")){
+                            const texKey = faceDef.texture.replace("#","")
+                            tex = textures[texKey]
+                        }else{
+                            tex = getTextureForRef(faceDef.texture)
+                        }
                         materials.push(new THREE.MeshLambertMaterial({ map: tex }))
                         applyFaceUV(geometry, i, faceDef.uv, tex?.image?.width||16, tex?.image?.height||16, faceDef.rotation, face)
                     }else{
