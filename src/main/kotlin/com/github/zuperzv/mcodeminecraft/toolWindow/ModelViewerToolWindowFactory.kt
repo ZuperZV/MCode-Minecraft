@@ -85,9 +85,11 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         }
 
         const loader = new THREE.TextureLoader()
+        const TICK_MS = 50
         const DEBUG_UV = true
         const modelCache = {}
         let textures = {}
+        let animatedTextures = new Map()
 
         function resolveTexture(texString){
             texString = texString.replace("#","")
@@ -148,6 +150,98 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             return resolveTextureRef(next, texMap, depth + 1)
         }
 
+        async function setupAnimatedTexture(tex, texPath){
+            const img = tex.image
+            if(!img || img.height <= img.width) return
+
+            const frameSize = img.width
+            const frameCount = Math.floor(img.height / frameSize)
+            if(frameCount <= 1) return
+
+            let frametime = 1
+            let interpolate = false
+            try{
+                const metaRes = await fetch(texPath + ".mcmeta")
+                if(metaRes.ok){
+                    const metaJson = await metaRes.json()
+                    const animation = metaJson?.animation || {}
+                    if(Number.isFinite(animation.frametime) && animation.frametime > 0){
+                        frametime = animation.frametime
+                    }
+                    interpolate = animation.interpolate === true
+                }
+            }catch(e){
+                console.warn("Animation meta load failed:", texPath, e)
+            }
+
+            const canvas = document.createElement("canvas")
+            canvas.width = frameSize
+            canvas.height = frameSize
+            const ctx = canvas.getContext("2d")
+            ctx.imageSmoothingEnabled = interpolate
+
+            tex.image = canvas
+            tex.needsUpdate = true
+            tex.generateMipmaps = false
+            tex.wrapS = THREE.ClampToEdgeWrapping
+            tex.wrapT = THREE.ClampToEdgeWrapping
+            tex.repeat.set(1, 1)
+            tex.offset.set(0, 0)
+            tex.magFilter = THREE.NearestFilter
+            tex.minFilter = THREE.NearestFilter
+
+            animatedTextures.set(texPath, {
+                texture: tex,
+                image: img,
+                ctx,
+                frameCount,
+                frameTimeMs: frametime * TICK_MS,
+                interpolate,
+                frameSize,
+                lastFrame: -1,
+                lastBlend: -1
+            })
+        }
+
+        function updateAnimatedTextures(nowMs){
+            animatedTextures.forEach(entry=>{
+                const elapsed = nowMs % (entry.frameTimeMs * entry.frameCount)
+                const frameProgress = elapsed / entry.frameTimeMs
+                const baseIndex = Math.floor(frameProgress)
+                const frameIndex = baseIndex % entry.frameCount
+                const blend = entry.interpolate ? (frameProgress - baseIndex) : 0
+
+                if(frameIndex === entry.lastFrame && blend === entry.lastBlend){
+                    return
+                }
+
+                const ctx = entry.ctx
+                const srcY = frameIndex * entry.frameSize
+                ctx.clearRect(0, 0, entry.frameSize, entry.frameSize)
+                ctx.globalAlpha = 1
+                ctx.drawImage(
+                    entry.image,
+                    0, srcY, entry.frameSize, entry.frameSize,
+                    0, 0, entry.frameSize, entry.frameSize
+                )
+                if(entry.interpolate && blend > 0){
+                    const nextIndex = (frameIndex + 1) % entry.frameCount
+                    const nextY = nextIndex * entry.frameSize
+                    ctx.globalAlpha = blend
+                    ctx.drawImage(
+                        entry.image,
+                        0, nextY, entry.frameSize, entry.frameSize,
+                        0, 0, entry.frameSize, entry.frameSize
+                    )
+                    ctx.globalAlpha = 1
+                }
+
+                entry.texture.needsUpdate = true
+                entry.lastFrame = frameIndex
+                entry.lastBlend = blend
+            })
+        }
+
         function getTextureForRef(texRef){
             if(!texRef) return null
             const cacheKey = texRef
@@ -155,7 +249,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 const texPath = resolveTexture(texRef)
                 textures[cacheKey] = loader.load(
                     texPath,
-                    ()=>console.log("Texture loaded:", texPath),
+                    (tex)=>{ console.log("Texture loaded:", texPath); setupAnimatedTexture(tex, texPath) },
                     undefined,
                     e=>console.error("Texture failed:", texPath, e)
                 )
@@ -206,6 +300,144 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             uvAttr.needsUpdate = true;
         }
 
+        function ensureColorAttribute(geometry){
+            if(!geometry.attributes.color){
+                const colorArray = new Float32Array(geometry.attributes.position.count * 3)
+                geometry.setAttribute("color", new THREE.BufferAttribute(colorArray, 3))
+            }
+        }
+
+        function minecraftAoLevel(side1, side2, corner){
+            if(side1 && side2) return 0
+            return 3 - (side1?1:0) - (side2?1:0) - (corner?1:0)
+        }
+
+        function minecraftAoBrightness(level){
+            const levels = [0.35, 0.5, 0.7, 0.95]
+            return levels[Math.max(0, Math.min(3, level))]
+        }
+
+        function computeFaceAOCorners(el, faceName, occupancy){
+            const minX = Math.floor(el.from[0])
+            const minY = Math.floor(el.from[1])
+            const minZ = Math.floor(el.from[2])
+            const maxX = Math.ceil(el.to[0]) - 1
+            const maxY = Math.ceil(el.to[1]) - 1
+            const maxZ = Math.ceil(el.to[2]) - 1
+
+            function isSolid(x,y,z){
+                return occupancy.has(x + "," + y + "," + z)
+            }
+
+            if(faceName === "north" || faceName === "south"){
+                const outsideZ = faceName === "north" ? minZ - 1 : maxZ + 1
+                function cornerBrightness(xIsMax, yIsMax){
+                    const x = xIsMax ? maxX : minX
+                    const y = yIsMax ? maxY : minY
+                    const sideX = x + (xIsMax ? 1 : -1)
+                    const sideY = y + (yIsMax ? 1 : -1)
+                    const side1 = isSolid(sideX, y, outsideZ)
+                    const side2 = isSolid(x, sideY, outsideZ)
+                    const corner = isSolid(sideX, sideY, outsideZ)
+                    return minecraftAoBrightness(minecraftAoLevel(side1, side2, corner))
+                }
+                return {
+                    "min-min": cornerBrightness(false, false),
+                    "min-max": cornerBrightness(false, true),
+                    "max-min": cornerBrightness(true, false),
+                    "max-max": cornerBrightness(true, true)
+                }
+            }
+            if(faceName === "east" || faceName === "west"){
+                const outsideX = faceName === "west" ? minX - 1 : maxX + 1
+                function cornerBrightness(zIsMax, yIsMax){
+                    const z = zIsMax ? maxZ : minZ
+                    const y = yIsMax ? maxY : minY
+                    const sideZ = z + (zIsMax ? 1 : -1)
+                    const sideY = y + (yIsMax ? 1 : -1)
+                    const side1 = isSolid(outsideX, y, sideZ)
+                    const side2 = isSolid(outsideX, sideY, z)
+                    const corner = isSolid(outsideX, sideY, sideZ)
+                    return minecraftAoBrightness(minecraftAoLevel(side1, side2, corner))
+                }
+                return {
+                    "min-min": cornerBrightness(false, false),
+                    "min-max": cornerBrightness(false, true),
+                    "max-min": cornerBrightness(true, false),
+                    "max-max": cornerBrightness(true, true)
+                }
+            }
+            const outsideY = faceName === "down" ? minY - 1 : maxY + 1
+            function cornerBrightness(xIsMax, zIsMax){
+                const x = xIsMax ? maxX : minX
+                const z = zIsMax ? maxZ : minZ
+                const sideX = x + (xIsMax ? 1 : -1)
+                const sideZ = z + (zIsMax ? 1 : -1)
+                const side1 = isSolid(sideX, outsideY, z)
+                const side2 = isSolid(x, outsideY, sideZ)
+                const corner = isSolid(sideX, outsideY, sideZ)
+                return minecraftAoBrightness(minecraftAoLevel(side1, side2, corner))
+            }
+            return {
+                "min-min": cornerBrightness(false, false),
+                "min-max": cornerBrightness(false, true),
+                "max-min": cornerBrightness(true, false),
+                "max-max": cornerBrightness(true, true)
+            }
+        }
+
+        function applyFaceAOColors(geometry, faceIndex, faceName, shade, el, sx, sy, sz, occupancy){
+            ensureColorAttribute(geometry)
+
+            const colors = geometry.attributes.color
+            const indexed = !!geometry.index
+            const idxBase = indexed ? faceIndex * 4 : faceIndex * 6
+            const count = indexed ? 4 : 6
+
+            const centerX = el.from[0] + sx / 2
+            const centerY = el.from[1] + sy / 2
+            const centerZ = el.from[2] + sz / 2
+
+            const axisA = (faceName === "north" || faceName === "south") ? "x" :
+                          (faceName === "east" || faceName === "west") ? "z" : "x"
+            const axisB = (faceName === "north" || faceName === "south") ? "y" :
+                          (faceName === "east" || faceName === "west") ? "y" : "z"
+
+            const aMid = axisA === "x" ? centerX : axisA === "y" ? centerY : centerZ
+            const bMid = axisB === "x" ? centerX : axisB === "y" ? centerY : centerZ
+
+            const aoCorners = computeFaceAOCorners(el, faceName, occupancy)
+
+            for(let i=0;i<count;i++){
+                const posIdx = idxBase + i
+                const vx = geometry.attributes.position.getX(posIdx) + centerX
+                const vy = geometry.attributes.position.getY(posIdx) + centerY
+                const vz = geometry.attributes.position.getZ(posIdx) + centerZ
+
+                const aVal = axisA === "x" ? vx : axisA === "y" ? vy : vz
+                const bVal = axisB === "x" ? vx : axisB === "y" ? vy : vz
+                const aIsMax = aVal > aMid
+                const bIsMax = bVal > bMid
+                const key = (aIsMax ? "max" : "min") + "-" + (bIsMax ? "max" : "min")
+                const ao = aoCorners[key] ?? 1.0
+                const value = shade * ao
+                colors.setXYZ(posIdx, value, value, value)
+            }
+            colors.needsUpdate = true
+        }
+
+        function minecraftFaceShade(faceName){
+            switch(faceName){
+                case "up": return 0.3
+                case "down": return 0.15
+                case "north":
+                case "south": return 0.2
+                case "east":
+                case "west": return 0.17
+                default: return 0.3
+            }
+        }
+
 
 
         window.pendingModelJson = null
@@ -213,8 +445,26 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         window.loadModel = async function(model){
             clearScene()
             textures = {}
+            animatedTextures = new Map()
 
             const resolvedModel = await resolveModel(model)
+            const occupancy = new Set()
+
+            resolvedModel.elements?.forEach(el=>{
+                const x0 = Math.floor(el.from[0])
+                const y0 = Math.floor(el.from[1])
+                const z0 = Math.floor(el.from[2])
+                const x1 = Math.ceil(el.to[0]) - 1
+                const y1 = Math.ceil(el.to[1]) - 1
+                const z1 = Math.ceil(el.to[2]) - 1
+                for(let x=x0; x<=x1; x++){
+                    for(let y=y0; y<=y1; y++){
+                        for(let z=z0; z<=z1; z++){
+                            occupancy.add(x + "," + y + "," + z)
+                        }
+                    }
+                }
+            })
 
             if(resolvedModel.textures){
                 Object.keys(resolvedModel.textures).forEach(key=>{
@@ -232,13 +482,14 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 const sy = el.to[1]-el.from[1]
                 const sz = el.to[2]-el.from[2]
 
-                const geometry = new THREE.BoxGeometry(sx,sy,sz)
+                const geometry = new THREE.BoxGeometry(sx,sy,sz).toNonIndexed()
                 console.log("[Geom] indexed", !!geometry.index, "uvCount", geometry.attributes?.uv?.count, "posCount", geometry.attributes?.position?.count)
                 const materials = []
                 const faceOrder=["east","west","up","down","south","north"]
 
                 faceOrder.forEach((face,i)=>{
                     const faceDef = el.faces?.[face]
+                    const shade = minecraftFaceShade(face)
                     if(faceDef && faceDef.texture){
                         let tex = null
                         if(faceDef.texture.startsWith("#")){
@@ -247,10 +498,12 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                         }else{
                             tex = getTextureForRef(faceDef.texture)
                         }
-                        materials.push(new THREE.MeshLambertMaterial({ map: tex }))
+                        materials.push(new THREE.MeshBasicMaterial({ map: tex, color: 0xffffff, vertexColors: true }))
                         applyFaceUV(geometry, i, faceDef.uv, tex?.image?.width||16, tex?.image?.height||16, faceDef.rotation, face)
+                        applyFaceAOColors(geometry, i, face, shade, el, sx, sy, sz, occupancy)
                     }else{
-                        materials.push(new THREE.MeshNormalMaterial())
+                        materials.push(new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: true }))
+                        applyFaceAOColors(geometry, i, face, shade, el, sx, sy, sz, occupancy)
                     }
                 })
 
@@ -274,6 +527,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
 
         function animate(){
             requestAnimationFrame(animate)
+            updateAnimatedTextures(performance.now())
             renderer.render(scene, camera)
         }
         animate()
