@@ -1,37 +1,188 @@
 package com.github.zuperzv.mcodeminecraft.toolWindow
 
+import com.github.zuperzv.mcodeminecraft.preview.ModelAutoPreviewService
 import com.github.zuperzv.mcodeminecraft.services.AssetServer
 import com.github.zuperzv.mcodeminecraft.services.ModelViewerService
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.ui.content.ContentFactory
+import com.intellij.ui.JBColor
+import com.intellij.ui.components.JBCheckBox
+import com.intellij.ui.components.JBLabel
+import com.intellij.ui.components.JBList
+import com.intellij.ui.components.JBScrollPane
+import com.intellij.ui.components.JBTextField
+import com.intellij.ui.jcef.JBCefApp
 import com.intellij.ui.jcef.JBCefBrowser
+import com.intellij.util.ui.JBUI
 import org.intellij.lang.annotations.Language
 import java.io.File
+import java.awt.BorderLayout
+import java.awt.Color
+import java.awt.Dimension
+import java.awt.FlowLayout
+import java.awt.Graphics
+import java.awt.Graphics2D
+import java.awt.RenderingHints
+import javax.swing.UIManager
+import javax.swing.plaf.basic.BasicSplitPaneDivider
+import javax.swing.plaf.basic.BasicSplitPaneUI
+import javax.swing.Box
+import javax.swing.BoxLayout
+import javax.swing.JButton
+import javax.swing.JPanel
+import javax.swing.JSplitPane
 
 class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
 
+    val SELECTED_BACKGROUND_COLOR: Color =
+        JBColor.namedColor(
+            "ActionButton.hoverBorderColor",
+            JBColor(0xc5dffc, 0x113a5c)
+        )
+
+    val BACKGROUND_COLOR: Color =
+        JBColor.namedColor(
+            "Panel.background",
+            JBColor(0x2B2B2B, 0x2B2B2B)
+        )
+
+    val BORDER_COLOR: Color =
+        JBColor.namedColor(
+            "Borders.color",
+            JBColor(0x26282b, 0x26282b)
+        )
+
+    private val logger = Logger.getInstance(ModelViewerToolWindowFactory::class.java)
+
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
+        dumpUiManagerKeysOnce()
 
-        project.getService(com.github.zuperzv.mcodeminecraft.preview.ModelAutoPreviewService::class.java)
+        project.getService(ModelAutoPreviewService::class.java)
 
-        val browser = JBCefBrowser()
-        project.getService(ModelViewerService::class.java).setBrowser(browser)
+        val viewerPanel: JPanel = JPanel(BorderLayout())
+        viewerPanel.isOpaque = false
+
+        val viewerContainer = object : JPanel(BorderLayout()) {
+            override fun paintComponent(g: Graphics) {
+                val g2 = g.create() as Graphics2D
+                try {
+                    g2.setRenderingHint(
+                        RenderingHints.KEY_ANTIALIASING,
+                        RenderingHints.VALUE_ANTIALIAS_ON
+                    )
+                    val arc = JBUI.scale(52)
+                    val inset = JBUI.scale(30)
+                    val rectWidth = width - inset * 2
+                    val rectHeight = height - inset * 2
+                    g2.color = SELECTED_BACKGROUND_COLOR
+                    g2.fillRoundRect(inset, inset, rectWidth, rectHeight, arc, arc)
+                    g2.color = JBColor.border()
+                    g2.drawRoundRect(inset, inset, rectWidth - 1, rectHeight - 1, arc, arc)
+                } finally {
+                    g2.dispose()
+                }
+                super.paintComponent(g)
+            }
+        }
+        viewerContainer.isOpaque = false
+        viewerContainer.border = JBUI.Borders.empty(52)
+        viewerContainer.add(viewerPanel, BorderLayout.CENTER)
+
+        val browser = if (JBCefApp.isSupported()) {
+            try {
+                JBCefBrowser().also {
+                    project.getService(ModelViewerService::class.java).setBrowser(it)
+                    viewerPanel.add(it.component, BorderLayout.CENTER)
+                }
+            } catch (e: Exception) {
+                logger.warn("Failed to create JCEF browser for tool window", e)
+                viewerPanel.add(JBLabel("Model viewer failed to initialize. Check IDE log."), BorderLayout.CENTER)
+                null
+            }
+        } else {
+            viewerPanel.add(JBLabel("JCEF is not supported in this IDE/runtime."), BorderLayout.CENTER)
+            null
+        }
+
+        val controlsPanel = JPanel()
+        controlsPanel.layout = BoxLayout(controlsPanel, BoxLayout.Y_AXIS)
+        controlsPanel.add(JBLabel("Model controls"))
+        controlsPanel.add(Box.createVerticalStrut(6))
+
+        val pathRow = JPanel(FlowLayout(FlowLayout.LEFT, 0, 0))
+        pathRow.add(JBLabel("Model path: "))
+        pathRow.add(JBTextField().apply { columns = 22 })
+        controlsPanel.add(pathRow)
+        controlsPanel.add(Box.createVerticalStrut(6))
+
+        val actionsRow = JPanel(FlowLayout(FlowLayout.LEFT, 0, 0))
+        actionsRow.add(JButton("Load"))
+        actionsRow.add(Box.createHorizontalStrut(6))
+        actionsRow.add(JButton("Reset camera"))
+        controlsPanel.add(actionsRow)
+        controlsPanel.add(Box.createVerticalStrut(6))
+
+        controlsPanel.add(JBCheckBox("Auto preview", true))
+        controlsPanel.add(Box.createVerticalStrut(8))
+        controlsPanel.add(JBLabel("Recent models"))
+        val recentModels = JBList(
+            listOf(
+                "minecraft:block/stone",
+                "minecraft:block/oak_log",
+                "minecraft:item/diamond_sword"
+            )
+        )
+        controlsPanel.add(
+            JBScrollPane(recentModels).apply {
+                preferredSize = Dimension(200, 140)
+            }
+        )
+
+        val splitPane = JSplitPane(JSplitPane.VERTICAL_SPLIT, viewerContainer, controlsPanel)
+
+        splitPane.resizeWeight = 0.7
+        splitPane.isOneTouchExpandable = false
+        splitPane.isOpaque = false
+        splitPane.dividerSize = JBUI.scale(8)
+        splitPane.border = null
+        splitPane.ui = object : BasicSplitPaneUI() {
+            override fun createDefaultDivider(): BasicSplitPaneDivider {
+                return object : BasicSplitPaneDivider(this) {
+                    override fun paint(g: Graphics) {
+                        g.color = BORDER_COLOR
+                        g.fillRect(0, 0, width, height)
+                    }
+                }.apply {
+                }
+            }
+        }
 
         val content = ContentFactory.getInstance()
-            .createContent(browser.component, "", false)
+            .createContent(splitPane, "", false)
+        content.component.border = JBUI.Borders.empty()
+        content.component.isOpaque = true
+        content.component.background = JBColor.background()
         toolWindow.contentManager.addContent(content)
+
 
         val projectRoot = project.basePath!!.replace("\\", "/")
 
         val assetsFolder = File(project.basePath, "src/main/resources/assets")
         val assetServerPort = 6192
-        AssetServer.start(assetsFolder, assetServerPort)
+        try {
+            AssetServer.start(assetsFolder, assetServerPort)
+        } catch (e: Exception) {
+            logger.warn("Failed to start asset server on port $assetServerPort", e)
+        }
 
-        browser.loadHTML(viewerHtml(projectRoot, assetServerPort), "http://localhost/")
-        browser.openDevtools()
+        browser?.let {
+            it.loadHTML(viewerHtml(projectRoot, assetServerPort), "http://localhost/")
+            it.openDevtools()
+        }
 
         println("ModelViewerToolWindow CREATED")
     }
@@ -58,16 +209,31 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         const camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.1, 1000)
         camera.position.set(40,40,40)
         camera.lookAt(0,0,0)
+        const DEFAULT_ORBIT_TARGET = new THREE.Vector3(0,0,0)
+        let orbitTarget = DEFAULT_ORBIT_TARGET.clone()
+        let currentModelCenter = DEFAULT_ORBIT_TARGET.clone()
+        let orbitRadius = camera.position.distanceTo(orbitTarget)
+        let orbitTheta = Math.atan2(camera.position.z - orbitTarget.z, camera.position.x - orbitTarget.x)
+        let orbitPhi = Math.acos((camera.position.y - orbitTarget.y) / orbitRadius)
 
         const light = new THREE.DirectionalLight(0xffffff, 1)
         light.position.set(50,50,50)
         scene.add(light)
-        scene.add(new THREE.AmbientLight(0x404040))
+        scene.add(new THREE.AmbientLight(0x212121))
 
         function clearScene(){
             while(scene.children.length > 2){
                 scene.remove(scene.children[2])
             }
+        }
+
+        function updateCameraFromOrbit(){
+            const sinPhi = Math.sin(orbitPhi)
+            const x = orbitTarget.x + orbitRadius * sinPhi * Math.cos(orbitTheta)
+            const y = orbitTarget.y + orbitRadius * Math.cos(orbitPhi)
+            const z = orbitTarget.z + orbitRadius * sinPhi * Math.sin(orbitTheta)
+            camera.position.set(x,y,z)
+            camera.lookAt(orbitTarget)
         }
 
         function rotateUVScalar(u, v, rotation) {
@@ -154,12 +320,11 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             const img = tex.image
             if(!img || img.height <= img.width) return
 
-            const frameSize = img.width
-            const frameCount = Math.floor(img.height / frameSize)
-            if(frameCount <= 1) return
-
             let frametime = 1
             let interpolate = false
+            let frameWidth = null
+            let frameHeight = null
+            let framesMeta = null
             try{
                 const metaRes = await fetch(texPath + ".mcmeta")
                 if(metaRes.ok){
@@ -169,14 +334,32 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                         frametime = animation.frametime
                     }
                     interpolate = animation.interpolate === true
+                    if(Number.isFinite(animation.width) && animation.width > 0){
+                        frameWidth = animation.width
+                    }
+                    if(Number.isFinite(animation.height) && animation.height > 0){
+                        frameHeight = animation.height
+                    }
+                    if(Array.isArray(animation.frames)){
+                        framesMeta = animation.frames
+                    }
                 }
             }catch(e){
                 console.warn("Animation meta load failed:", texPath, e)
             }
 
+            const inferredSize = Math.min(img.width, img.height)
+            frameWidth = frameWidth || inferredSize
+            frameHeight = frameHeight || inferredSize
+
+            const columns = Math.floor(img.width / frameWidth)
+            const rows = Math.floor(img.height / frameHeight)
+            const totalFrames = columns * rows
+            if(totalFrames <= 1) return
+
             const canvas = document.createElement("canvas")
-            canvas.width = frameSize
-            canvas.height = frameSize
+            canvas.width = frameWidth
+            canvas.height = frameHeight
             const ctx = canvas.getContext("2d")
             ctx.imageSmoothingEnabled = interpolate
 
@@ -190,14 +373,51 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             tex.magFilter = THREE.NearestFilter
             tex.minFilter = THREE.NearestFilter
 
+            const defaultFrameTimeMs = frametime * TICK_MS
+            const frames = []
+            if(framesMeta && framesMeta.length){
+                framesMeta.forEach((entry)=>{
+                    if(Number.isFinite(entry)){
+                        frames.push({ index: entry, timeMs: defaultFrameTimeMs })
+                        return
+                    }
+                    if(entry && Number.isFinite(entry.index)){
+                        const timeMs = Number.isFinite(entry.time) && entry.time > 0
+                            ? entry.time * TICK_MS
+                            : defaultFrameTimeMs
+                        frames.push({ index: entry.index, timeMs })
+                    }
+                })
+            }
+            if(!frames.length){
+                for(let i=0;i<totalFrames;i++){
+                    frames.push({ index: i, timeMs: defaultFrameTimeMs })
+                }
+            }
+            const filteredFrames = frames
+                .filter(f => Number.isFinite(f.index) && f.index >= 0 && f.index < totalFrames)
+                .map(f => {
+                    const row = Math.floor(f.index / columns)
+                    const col = f.index % columns
+                    return {
+                        index: f.index,
+                        timeMs: f.timeMs,
+                        srcX: col * frameWidth,
+                        srcY: row * frameHeight
+                    }
+                })
+            if(!filteredFrames.length) return
+            const totalDurationMs = filteredFrames.reduce((sum, f) => sum + f.timeMs, 0)
+
             animatedTextures.set(texPath, {
                 texture: tex,
                 image: img,
                 ctx,
-                frameCount,
-                frameTimeMs: frametime * TICK_MS,
+                frameWidth,
+                frameHeight,
+                frames: filteredFrames,
+                totalDurationMs,
                 interpolate,
-                frameSize,
                 lastFrame: -1,
                 lastBlend: -1
             })
@@ -205,39 +425,46 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
 
         function updateAnimatedTextures(nowMs){
             animatedTextures.forEach(entry=>{
-                const elapsed = nowMs % (entry.frameTimeMs * entry.frameCount)
-                const frameProgress = elapsed / entry.frameTimeMs
-                const baseIndex = Math.floor(frameProgress)
-                const frameIndex = baseIndex % entry.frameCount
-                const blend = entry.interpolate ? (frameProgress - baseIndex) : 0
+                const elapsed = entry.totalDurationMs > 0 ? (nowMs % entry.totalDurationMs) : 0
+                let acc = 0
+                let framePos = 0
+                for(let i=0;i<entry.frames.length;i++){
+                    acc += entry.frames[i].timeMs
+                    if(elapsed < acc){
+                        framePos = i
+                        break
+                    }
+                }
+                const frame = entry.frames[framePos]
+                const prevAcc = acc - frame.timeMs
+                const blend = entry.interpolate ? ((elapsed - prevAcc) / frame.timeMs) : 0
 
-                if(frameIndex === entry.lastFrame && blend === entry.lastBlend){
+                if(framePos === entry.lastFrame && blend === entry.lastBlend){
                     return
                 }
 
                 const ctx = entry.ctx
-                const srcY = frameIndex * entry.frameSize
-                ctx.clearRect(0, 0, entry.frameSize, entry.frameSize)
+                ctx.clearRect(0, 0, entry.frameWidth, entry.frameHeight)
                 ctx.globalAlpha = 1
                 ctx.drawImage(
                     entry.image,
-                    0, srcY, entry.frameSize, entry.frameSize,
-                    0, 0, entry.frameSize, entry.frameSize
+                    frame.srcX, frame.srcY, entry.frameWidth, entry.frameHeight,
+                    0, 0, entry.frameWidth, entry.frameHeight
                 )
                 if(entry.interpolate && blend > 0){
-                    const nextIndex = (frameIndex + 1) % entry.frameCount
-                    const nextY = nextIndex * entry.frameSize
+                    const nextPos = (framePos + 1) % entry.frames.length
+                    const nextFrame = entry.frames[nextPos]
                     ctx.globalAlpha = blend
                     ctx.drawImage(
                         entry.image,
-                        0, nextY, entry.frameSize, entry.frameSize,
-                        0, 0, entry.frameSize, entry.frameSize
+                        nextFrame.srcX, nextFrame.srcY, entry.frameWidth, entry.frameHeight,
+                        0, 0, entry.frameWidth, entry.frameHeight
                     )
                     ctx.globalAlpha = 1
                 }
 
                 entry.texture.needsUpdate = true
-                entry.lastFrame = frameIndex
+                entry.lastFrame = framePos
                 entry.lastBlend = blend
             })
         }
@@ -313,7 +540,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         }
 
         function minecraftAoBrightness(level){
-            const levels = [0.35, 0.5, 0.7, 0.95]
+            const levels = [0.25, 0.3, 0.6, 0.75]
             return levels[Math.max(0, Math.min(3, level))]
         }
 
@@ -437,20 +664,30 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 default: return 0.3
             }
         }
-
-
-
+        
         window.pendingModelJson = null
 
-        window.loadModel = async function(model){
+        window.loadModel = async function(model, resetCamera=true){
             clearScene()
             textures = {}
             animatedTextures = new Map()
 
             const resolvedModel = await resolveModel(model)
             const occupancy = new Set()
+            let minX = Infinity
+            let minY = Infinity
+            let minZ = Infinity
+            let maxX = -Infinity
+            let maxY = -Infinity
+            let maxZ = -Infinity
 
             resolvedModel.elements?.forEach(el=>{
+                minX = Math.min(minX, el.from[0])
+                minY = Math.min(minY, el.from[1])
+                minZ = Math.min(minZ, el.from[2])
+                maxX = Math.max(maxX, el.to[0])
+                maxY = Math.max(maxY, el.to[1])
+                maxZ = Math.max(maxZ, el.to[2])
                 const x0 = Math.floor(el.from[0])
                 const y0 = Math.floor(el.from[1])
                 const z0 = Math.floor(el.from[2])
@@ -475,7 +712,18 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 })
             }
 
-            const center = new THREE.Vector3(8,8,8)
+            const computedCenter = (isFinite(minX) && isFinite(maxX)) ? new THREE.Vector3(
+                (minX + maxX) / 2,
+                (minY + maxY) / 2,
+                (minZ + maxZ) / 2
+            ) : DEFAULT_ORBIT_TARGET
+            if(resetCamera){
+                currentModelCenter = computedCenter
+            }
+            const center = currentModelCenter
+            if(resetCamera){
+                orbitTarget = new THREE.Vector3(0,0,0)
+            }
 
             resolvedModel.elements?.forEach(el=>{
                 const sx = el.to[0]-el.from[0]
@@ -515,6 +763,22 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 )
                 scene.add(mesh)
             })
+
+            if(resetCamera){
+                orbitRadius = Math.max(10, camera.position.distanceTo(orbitTarget))
+                orbitTheta = Math.atan2(camera.position.z - orbitTarget.z, camera.position.x - orbitTarget.x)
+                orbitPhi = Math.acos((camera.position.y - orbitTarget.y) / orbitRadius)
+                updateCameraFromOrbit()
+            }
+        }
+
+        window.loadModelFromJson = function(jsonText, resetCamera=true){
+            try{
+                const parsed = JSON.parse(jsonText)
+                return window.loadModel(parsed, resetCamera)
+            }catch(e){
+                console.warn("Model JSON parse failed:", e)
+            }
         }
 
         window.addEventListener('DOMContentLoaded', ()=>{
@@ -532,6 +796,61 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         }
         animate()
 
+        let isDragging = false
+        let isPanning = false
+        let lastX = 0
+        let lastY = 0
+
+        canvas.addEventListener("mousedown", (e)=>{
+            if(e.button === 0){
+                isDragging = true
+            }else if(e.button === 2){
+                isPanning = true
+            }
+            lastX = e.clientX
+            lastY = e.clientY
+        })
+
+        window.addEventListener("mouseup", ()=>{
+            isDragging = false
+            isPanning = false
+        })
+
+        window.addEventListener("mousemove", (e)=>{
+            const dx = e.clientX - lastX
+            const dy = e.clientY - lastY
+            lastX = e.clientX
+            lastY = e.clientY
+
+            if(isDragging){
+                const ROT_SPEED = 0.005
+                orbitTheta += dx * ROT_SPEED
+                orbitPhi -= dy * ROT_SPEED
+                const EPS = 0.01
+                orbitPhi = Math.max(EPS, Math.min(Math.PI - EPS, orbitPhi))
+                updateCameraFromOrbit()
+            }else if(isPanning){
+                const PAN_SPEED = 0.002 * orbitRadius
+                const forward = new THREE.Vector3()
+                const right = new THREE.Vector3()
+                camera.getWorldDirection(forward)
+                right.crossVectors(forward, camera.up).normalize()
+                const up = camera.up.clone().normalize()
+                orbitTarget.addScaledVector(right, -dx * PAN_SPEED)
+                orbitTarget.addScaledVector(up, dy * PAN_SPEED)
+                updateCameraFromOrbit()
+            }
+        })
+
+        canvas.addEventListener("wheel", (e)=>{
+            e.preventDefault()
+            const ZOOM_SPEED = 0.002
+            orbitRadius = Math.max(2, orbitRadius * (1 + e.deltaY * ZOOM_SPEED))
+            updateCameraFromOrbit()
+        }, { passive: false })
+
+        canvas.addEventListener("contextmenu", (e)=>e.preventDefault())
+
         window.addEventListener('resize', ()=>{
             renderer.setSize(Math.floor(window.innerWidth), Math.floor(window.innerHeight))
             camera.aspect = window.innerWidth / window.innerHeight
@@ -541,4 +860,31 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         </body>
         </html>
     """.trimIndent()
+
+    private fun dumpUiManagerKeysOnce() {
+        if (!uiManagerDumped) {
+            uiManagerDumped = true
+            val defaults = UIManager.getDefaults()
+            val keys = mutableListOf<String>()
+            val enumeration = defaults.keys()
+            while (enumeration.hasMoreElements()) {
+                keys.add(enumeration.nextElement().toString())
+            }
+            keys.sort()
+            keys.forEach { key ->
+                val value = defaults[key]
+                val rendered = when (value) {
+                    is Color ->
+                        String.format("#%02X%02X%02X", value.red, value.green, value.blue)
+                    else -> value?.toString() ?: "null"
+                }
+                println("UIManager key: $key = $rendered (${value?.javaClass?.name ?: "null"})")
+            }
+        }
+    }
+
+    companion object {
+        @Volatile
+        private var uiManagerDumped = false
+    }
 }

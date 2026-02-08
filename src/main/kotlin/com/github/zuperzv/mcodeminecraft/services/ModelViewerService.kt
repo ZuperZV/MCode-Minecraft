@@ -38,7 +38,7 @@ class ModelViewerService {
         )
     }
 
-    fun loadModel(json: String) {
+    fun loadModel(json: String, resetCamera: Boolean = true) {
         println("loadModel called")
 
         pageReady = true
@@ -54,7 +54,7 @@ class ModelViewerService {
             .replace("`", "\\`")
             .replace("$", "\\$")
 
-        val jsCode = "window.loadModel(JSON.parse(`$escaped`));"
+        val jsCode = "window.loadModelFromJson(`$escaped`, ${resetCamera});"
 
         browser!!.cefBrowser.executeJavaScript(
             jsCode,
