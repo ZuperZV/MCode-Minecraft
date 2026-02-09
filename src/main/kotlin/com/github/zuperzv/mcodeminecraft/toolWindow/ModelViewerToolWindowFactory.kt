@@ -841,6 +841,23 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                     el.from[1]+sy/2 - center.y,
                     el.from[2]+sz/2 - center.z
                 )
+                if(el.rotation && Number.isFinite(el.rotation.angle) && el.rotation.axis && el.rotation.origin){
+                    const axisName = el.rotation.axis
+                    const axisVec = axisName === "x" ? new THREE.Vector3(1,0,0)
+                        : axisName === "y" ? new THREE.Vector3(0,1,0)
+                        : new THREE.Vector3(0,0,1)
+                    const angleRad = THREE.MathUtils.degToRad(el.rotation.angle)
+                    const origin = new THREE.Vector3(
+                        el.rotation.origin[0],
+                        el.rotation.origin[1],
+                        el.rotation.origin[2]
+                    )
+                    const pivot = origin.sub(center)
+                    mesh.position.sub(pivot)
+                    mesh.position.applyAxisAngle(axisVec, angleRad)
+                    mesh.position.add(pivot)
+                    mesh.rotateOnAxis(axisVec, angleRad)
+                }
                 mesh.userData.elementIndex = elementIndex
                 scene.add(mesh)
                 pickableMeshes.push(mesh)
