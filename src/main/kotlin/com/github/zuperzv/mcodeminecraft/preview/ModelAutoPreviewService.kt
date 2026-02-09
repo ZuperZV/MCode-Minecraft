@@ -8,6 +8,7 @@ import com.intellij.openapi.editor.event.DocumentListener
 import com.intellij.openapi.fileEditor.FileEditorManagerListener
 import com.intellij.openapi.fileEditor.FileEditorManagerEvent
 import com.intellij.openapi.fileEditor.FileDocumentManager
+import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 
@@ -45,10 +46,20 @@ class ModelAutoPreviewService(private val project: Project) {
 
                     if (file.extension != "json") {
                         activeJsonFile = null
+                        project.getService(ModelViewerService::class.java)
+                            .setActiveModelFile(null)
+                        project.getService(ModelViewerService::class.java)
+                            .setActiveModelEditor(null)
                         project.getService(ModelViewerService::class.java).clearHoverHighlight()
                         return
                     }
                     activeJsonFile = file
+                    project.getService(ModelViewerService::class.java)
+                        .setActiveModelFile(file)
+                    val editor = (event.newEditor as? com.intellij.openapi.fileEditor.TextEditor)?.editor
+                        ?: FileEditorManager.getInstance(project).selectedTextEditor
+                    project.getService(ModelViewerService::class.java)
+                        .setActiveModelEditor(editor)
 
                     try {
                         val json = String(file.contentsToByteArray())

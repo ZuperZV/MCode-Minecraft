@@ -7,8 +7,12 @@ import com.intellij.openapi.editor.markup.HighlighterLayer
 import com.intellij.openapi.editor.markup.HighlighterTargetArea
 import com.intellij.openapi.editor.markup.RangeHighlighter
 import com.intellij.openapi.editor.markup.TextAttributes
+import com.intellij.openapi.editor.ScrollType
 import com.intellij.openapi.fileEditor.FileEditorManager
+import com.intellij.openapi.fileEditor.FileDocumentManager
+import com.intellij.openapi.fileEditor.TextEditor
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.ui.jcef.JBCefJSQuery
 import org.cef.browser.CefBrowser
@@ -20,9 +24,13 @@ import java.awt.Font
 @Service(Service.Level.PROJECT)
 class ModelViewerService(private val project: Project) {
 
+    private val logger = Logger.getInstance(ModelViewerService::class.java)
+
     private var browser: JBCefBrowser? = null
     private var pendingJson: String? = null
     private var pageReady = false
+    private var activeModelFile: com.intellij.openapi.vfs.VirtualFile? = null
+    private var activeModelEditor: Editor? = null
     private var hoverQuery: JBCefJSQuery? = null
     private var hoverHighlighter: RangeHighlighter? = null
     private var hoverEditor: Editor? = null
@@ -32,8 +40,11 @@ class ModelViewerService(private val project: Project) {
         println("Browser registered")
         browser = b
         hoverQuery?.dispose()
+        @Suppress("DEPRECATION")
         hoverQuery = JBCefJSQuery.create(b).apply {
             addHandler { query ->
+                println("Hover query received: $query")
+                logger.warn("Hover query received: $query")
                 handleHoverRequest(query)
                 null
             }
@@ -61,7 +72,19 @@ class ModelViewerService(private val project: Project) {
     }
 
     fun getHoverQueryInjection(functionName: String): String {
+        if (hoverQuery == null) {
+            println("Hover query not ready; injection skipped")
+            logger.warn("Hover query not ready; injection skipped")
+        }
         return hoverQuery?.inject(functionName) ?: ""
+    }
+
+    fun setActiveModelFile(file: com.intellij.openapi.vfs.VirtualFile?) {
+        activeModelFile = file
+    }
+
+    fun setActiveModelEditor(editor: Editor?) {
+        activeModelEditor = editor
     }
 
     fun loadModel(json: String, resetCamera: Boolean = true) {
@@ -97,19 +120,38 @@ class ModelViewerService(private val project: Project) {
     }
 
     private fun handleHoverRequest(request: String) {
-        val index = request.trim().toIntOrNull() ?: return
+        println("Hover request raw: '$request'")
+        val trimmed = request.trim()
+        if (trimmed.isEmpty() || trimmed == "null" || trimmed == "undefined") {
+            println("Hover request not numeric: '$trimmed'")
+            logger.warn("Hover request not numeric: '$trimmed'")
+            return
+        }
+        if (trimmed == "ping") {
+            println("Hover ping received")
+            logger.warn("Hover ping received")
+            return
+        }
+        val index = trimmed.toIntOrNull() ?: return
         if (index < 0) {
+            println("Hover cleared")
+            logger.warn("Hover cleared")
             clearHoverHighlight()
             return
         }
         if (index == lastHoverIndex) return
-        val editor = FileEditorManager.getInstance(project).selectedTextEditor
+        val editor = resolveHoverEditor()
         if (editor == null) {
+            println("Hover editor not available")
+            logger.warn("Hover editor not available")
             clearHoverHighlight()
             return
         }
         val ranges = findElementRanges(editor.document.text)
+        println("Hover ranges found: ${ranges.size}")
         if (index >= ranges.size) {
+            println("Hover index out of range: $index >= ${ranges.size}")
+            logger.warn("Hover index out of range: $index >= ${ranges.size}")
             clearHoverHighlight()
             return
         }
@@ -132,7 +174,33 @@ class ModelViewerService(private val project: Project) {
             )
             hoverEditor = editor
             lastHoverIndex = index
+            println("Hover highlight applied: index=$index range=${range.first}-${range.last}")
+            logger.warn("Hover highlight applied: index=$index range=${range.first}-${range.last}")
+            editor.scrollingModel.scrollTo(
+                editor.offsetToLogicalPosition(range.first),
+                ScrollType.MAKE_VISIBLE
+            )
         }
+    }
+
+    private fun resolveHoverEditor(): Editor? {
+        val manager = FileEditorManager.getInstance(project)
+        val selected = manager.selectedTextEditor
+        val activeEditor = activeModelEditor?.takeIf { !it.isDisposed }
+        if (activeEditor != null) {
+            return activeEditor
+        }
+        if (activeModelFile == null) {
+            return selected
+        }
+        val activeDoc = FileDocumentManager.getInstance().getDocument(activeModelFile!!)
+        if (selected != null && selected.document == activeDoc) {
+            return selected
+        }
+        val editor = manager.getEditors(activeModelFile!!).firstOrNull {
+            it is TextEditor
+        } as? TextEditor
+        return editor?.editor ?: selected
     }
 
     private fun findElementRanges(text: String): List<IntRange> {

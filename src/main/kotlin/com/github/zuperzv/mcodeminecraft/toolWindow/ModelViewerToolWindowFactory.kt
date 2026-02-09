@@ -182,6 +182,8 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         browser?.let {
             val hoverInjection = project.getService(ModelViewerService::class.java)
                 .getHoverQueryInjection("hoverElement")
+            println("Hover injection length: " + hoverInjection.length)
+            println("Hover injection: " + hoverInjection)
             it.loadHTML(viewerHtml(projectRoot, assetServerPort, hoverInjection), "http://localhost/")
             it.openDevtools()
         }
@@ -199,9 +201,13 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         
         <script>
         console.log("Viewer JS running")
-        var hoverElement = null;
-        ;$hoverInjection;
-        const sendHover = (typeof window.hoverElement === "function") ? window.hoverElement : null
+        window.addEventListener("error", (e)=>console.error("Viewer JS error:", e.message, e.error))
+        const sendHover = (msg)=>{
+            const hoverElement = msg
+            ;$hoverInjection;
+        }
+        console.log("sendHover type:", typeof sendHover)
+        let hoverHandshakeSent = false
         const PROJECT_ROOT = "$projectRoot"
         const ASSET_PORT = $assetPort
      
@@ -272,6 +278,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         const pickableMeshes = []
         const originalMaterialColors = new WeakMap()
         const hoverState = { object: null }
+        let hoverDebugLogged = false
 
         function resolveTexture(texString){
             texString = texString.replace("#","")
@@ -741,7 +748,11 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             hoverState.object = next
             if(sendHover){
                 const index = next?.userData?.elementIndex
+                console.log("Hover element index:", index)
                 sendHover(String(Number.isInteger(index) ? index : -1))
+            }else if(!hoverDebugLogged){
+                console.log("sendHover not available")
+                hoverDebugLogged = true
             }
         }
         
@@ -805,6 +816,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 orbitTarget = new THREE.Vector3(0,0,0)
             }
 
+            console.log("Resolved elements:", resolvedModel.elements?.length || 0)
             resolvedModel.elements?.forEach((el, elementIndex)=>{
                 const sx = el.to[0]-el.from[0]
                 const sy = el.to[1]-el.from[1]
@@ -862,6 +874,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 scene.add(mesh)
                 pickableMeshes.push(mesh)
             })
+            console.log("Pickable meshes:", pickableMeshes.length)
 
             if(resetCamera){
                 orbitRadius = Math.max(10, camera.position.distanceTo(orbitTarget))
@@ -886,6 +899,16 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 window.pendingModelJson = null
             }
             console.log("Viewer HTML ready")
+            if(sendHover){
+                try{
+                    sendHover("ping")
+                }catch(e){
+                    console.error("Hover ping failed:", e)
+                }
+                console.log("Hover ping sent")
+            }else{
+                console.log("Hover ping skipped; sendHover not available")
+            }
         })
 
         function animate(){
@@ -925,6 +948,11 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1
             pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1
             hasPointer = true
+            if(sendHover && !hoverHandshakeSent){
+                sendHover("-1")
+                hoverHandshakeSent = true
+                console.log("Hover handshake sent")
+            }
 
             if(isDragging){
                 const ROT_SPEED = 0.005
