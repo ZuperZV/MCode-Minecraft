@@ -225,6 +225,11 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             while(scene.children.length > 2){
                 scene.remove(scene.children[2])
             }
+            pickableMeshes.length = 0
+            if(hoverState.object){
+                setMeshHighlight(hoverState.object, false)
+                hoverState.object = null
+            }
         }
 
         function updateCameraFromOrbit(){
@@ -256,6 +261,12 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         const modelCache = {}
         let textures = {}
         let animatedTextures = new Map()
+        const raycaster = new THREE.Raycaster()
+        const pointer = new THREE.Vector2()
+        let hasPointer = false
+        const pickableMeshes = []
+        const originalMaterialColors = new WeakMap()
+        const hoverState = { object: null }
 
         function resolveTexture(texString){
             texString = texString.replace("#","")
@@ -664,6 +675,38 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 default: return 0.3
             }
         }
+
+        function setMeshHighlight(mesh, enabled){
+            const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+            mats.forEach(mat=>{
+                if(!mat || !mat.color) return
+                let base = originalMaterialColors.get(mat)
+                if(!base){
+                    base = mat.color.clone()
+                    originalMaterialColors.set(mat, base)
+                }
+                if(enabled){
+                    mat.color.setHex(0xfff2a6)
+                }else{
+                    mat.color.copy(base)
+                }
+            })
+        }
+
+        function updateHover(){
+            if(!hasPointer) return
+            raycaster.setFromCamera(pointer, camera)
+            const hits = raycaster.intersectObjects(pickableMeshes, false)
+            const next = hits.length ? hits[0].object : null
+            if(next === hoverState.object) return
+            if(hoverState.object){
+                setMeshHighlight(hoverState.object, false)
+            }
+            if(next){
+                setMeshHighlight(next, true)
+            }
+            hoverState.object = next
+        }
         
         window.pendingModelJson = null
 
@@ -762,6 +805,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                     el.from[2]+sz/2 - center.z
                 )
                 scene.add(mesh)
+                pickableMeshes.push(mesh)
             })
 
             if(resetCamera){
@@ -792,6 +836,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         function animate(){
             requestAnimationFrame(animate)
             updateAnimatedTextures(performance.now())
+            updateHover()
             renderer.render(scene, camera)
         }
         animate()
@@ -821,6 +866,10 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             const dy = e.clientY - lastY
             lastX = e.clientX
             lastY = e.clientY
+            const rect = canvas.getBoundingClientRect()
+            pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1
+            pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1
+            hasPointer = true
 
             if(isDragging){
                 const ROT_SPEED = 0.005
@@ -839,6 +888,14 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 orbitTarget.addScaledVector(right, -dx * PAN_SPEED)
                 orbitTarget.addScaledVector(up, dy * PAN_SPEED)
                 updateCameraFromOrbit()
+            }
+        })
+
+        canvas.addEventListener("mouseleave", ()=>{
+            hasPointer = false
+            if(hoverState.object){
+                setMeshHighlight(hoverState.object, false)
+                hoverState.object = null
             }
         })
 
