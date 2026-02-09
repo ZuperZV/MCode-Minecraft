@@ -45,6 +45,7 @@ class ModelAutoPreviewService(private val project: Project) {
 
                     if (file.extension != "json") {
                         activeJsonFile = null
+                        project.getService(ModelViewerService::class.java).clearHoverHighlight()
                         return
                     }
                     activeJsonFile = file

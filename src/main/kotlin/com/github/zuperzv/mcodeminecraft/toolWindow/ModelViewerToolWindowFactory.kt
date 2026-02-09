@@ -180,7 +180,9 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         }
 
         browser?.let {
-            it.loadHTML(viewerHtml(projectRoot, assetServerPort), "http://localhost/")
+            val hoverInjection = project.getService(ModelViewerService::class.java)
+                .getHoverQueryInjection("hoverElement")
+            it.loadHTML(viewerHtml(projectRoot, assetServerPort, hoverInjection), "http://localhost/")
             it.openDevtools()
         }
 
@@ -188,7 +190,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
     }
 
     @Language("HTML")
-    private fun viewerHtml(projectRoot: String, assetPort: Int) = """
+    private fun viewerHtml(projectRoot: String, assetPort: Int, hoverInjection: String) = """
         <html>
         <body style="margin:0; overflow:hidden;">
         <canvas id="c"></canvas>
@@ -197,6 +199,9 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         
         <script>
         console.log("Viewer JS running")
+        var hoverElement = null;
+        ;$hoverInjection;
+        const sendHover = (typeof window.hoverElement === "function") ? window.hoverElement : null
         const PROJECT_ROOT = "$projectRoot"
         const ASSET_PORT = $assetPort
      
@@ -676,19 +681,47 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             }
         }
 
+        const HOVER_COLOR_BOOST = 0.35
+
         function setMeshHighlight(mesh, enabled){
             const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
             mats.forEach(mat=>{
                 if(!mat || !mat.color) return
                 let base = originalMaterialColors.get(mat)
                 if(!base){
-                    base = mat.color.clone()
+                    base = {
+                        color: mat.color.clone(),
+                        emissive: mat.emissive ? mat.emissive.clone() : null,
+                        emissiveIntensity: Number.isFinite(mat.emissiveIntensity) ? mat.emissiveIntensity : null,
+                        vertexColors: mat.vertexColors,
+                        wireframe: mat.wireframe
+                    }
                     originalMaterialColors.set(mat, base)
                 }
                 if(enabled){
-                    mat.color.setHex(0xfff2a6)
+                    mat.color.copy(base.color).multiplyScalar(HOVER_COLOR_BOOST)
+                    if(mat.emissive){
+                        if(base.emissive){
+                            mat.emissive.copy(base.emissive).multiplyScalar(HOVER_COLOR_BOOST)
+                        }else{
+                            mat.emissive.setHex(0xffffff)
+                        }
+                        mat.emissiveIntensity = Math.max(0.8, base.emissiveIntensity ?? 0.8)
+                    }
+                    mat.vertexColors = false
+                    mat.wireframe = false
+                    mat.needsUpdate = true
                 }else{
-                    mat.color.copy(base)
+                    mat.color.copy(base.color)
+                    if(mat.emissive && base.emissive){
+                        mat.emissive.copy(base.emissive)
+                        if(base.emissiveIntensity !== null){
+                            mat.emissiveIntensity = base.emissiveIntensity
+                        }
+                    }
+                    mat.vertexColors = base.vertexColors
+                    mat.wireframe = base.wireframe
+                    mat.needsUpdate = true
                 }
             })
         }
@@ -706,6 +739,10 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 setMeshHighlight(next, true)
             }
             hoverState.object = next
+            if(sendHover){
+                const index = next?.userData?.elementIndex
+                sendHover(String(Number.isInteger(index) ? index : -1))
+            }
         }
         
         window.pendingModelJson = null
@@ -768,7 +805,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 orbitTarget = new THREE.Vector3(0,0,0)
             }
 
-            resolvedModel.elements?.forEach(el=>{
+            resolvedModel.elements?.forEach((el, elementIndex)=>{
                 const sx = el.to[0]-el.from[0]
                 const sy = el.to[1]-el.from[1]
                 const sz = el.to[2]-el.from[2]
@@ -804,6 +841,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                     el.from[1]+sy/2 - center.y,
                     el.from[2]+sz/2 - center.z
                 )
+                mesh.userData.elementIndex = elementIndex
                 scene.add(mesh)
                 pickableMeshes.push(mesh)
             })
@@ -896,6 +934,9 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             if(hoverState.object){
                 setMeshHighlight(hoverState.object, false)
                 hoverState.object = null
+            }
+            if(sendHover){
+                sendHover("-1")
             }
         })
 
