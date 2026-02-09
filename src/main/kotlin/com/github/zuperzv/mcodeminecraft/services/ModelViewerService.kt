@@ -1,6 +1,7 @@
 package com.github.zuperzv.mcodeminecraft.services
 
 import com.intellij.openapi.components.Service
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.markup.EffectType
 import com.intellij.openapi.editor.markup.HighlighterLayer
@@ -13,8 +14,10 @@ import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.TextEditor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.diagnostic.Logger
+import com.intellij.ui.JBColor
 import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.ui.jcef.JBCefJSQuery
+import com.intellij.util.Alarm
 import org.cef.browser.CefBrowser
 import org.cef.browser.CefFrame
 import org.cef.handler.CefLoadHandlerAdapter
@@ -26,6 +29,12 @@ class ModelViewerService(private val project: Project) {
 
     private val logger = Logger.getInstance(ModelViewerService::class.java)
 
+    val TEXT_HIGHLIGHT_TEXT: Color =
+        JBColor.namedColor(
+            "SplitPane.highlight",
+            JBColor(0x3C3F41, 0x3C3F41)
+        )
+
     private var browser: JBCefBrowser? = null
     private var pendingJson: String? = null
     private var pageReady = false
@@ -35,6 +44,7 @@ class ModelViewerService(private val project: Project) {
     private var hoverHighlighter: RangeHighlighter? = null
     private var hoverEditor: Editor? = null
     private var lastHoverIndex: Int? = null
+    private val scrollAlarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, project)
 
     fun setBrowser(b: JBCefBrowser) {
         println("Browser registered")
@@ -157,29 +167,69 @@ class ModelViewerService(private val project: Project) {
         }
         val range = ranges[index]
         if (hoverEditor != editor || lastHoverIndex != index) {
-            clearHoverHighlight()
-            val attrs = TextAttributes(
-                null,
-                Color(0xC0, 0xC0, 0xC0),
-                null,
-                EffectType.BOXED,
-                Font.PLAIN
-            )
-            hoverHighlighter = editor.markupModel.addRangeHighlighter(
-                range.first,
-                range.last + 1,
-                HighlighterLayer.SELECTION - 1,
-                attrs,
-                HighlighterTargetArea.EXACT_RANGE
-            )
-            hoverEditor = editor
-            lastHoverIndex = index
-            println("Hover highlight applied: index=$index range=${range.first}-${range.last}")
-            logger.warn("Hover highlight applied: index=$index range=${range.first}-${range.last}")
-            editor.scrollingModel.scrollTo(
-                editor.offsetToLogicalPosition(range.first),
-                ScrollType.MAKE_VISIBLE
-            )
+            ApplicationManager.getApplication().invokeLater {
+                if (editor.isDisposed) {
+                    return@invokeLater
+                }
+                if (hoverEditor != editor || lastHoverIndex != index) {
+                    clearHoverHighlight()
+                    val attrs = TextAttributes(
+                        null,
+                        TEXT_HIGHLIGHT_TEXT,
+                        null,
+                        EffectType.ROUNDED_BOX,
+                        Font.BOLD
+                    )
+                    hoverHighlighter = editor.markupModel.addRangeHighlighter(
+                        range.first,
+                        range.last + 1,
+                        HighlighterLayer.SELECTION - 1,
+                        attrs,
+                        HighlighterTargetArea.EXACT_RANGE
+                    )
+                    hoverEditor = editor
+                    lastHoverIndex = index
+                }
+                val projectFocus = com.intellij.openapi.wm.IdeFocusManager.getInstance(project)
+                val offset = range.first
+                val expectedEditor = editor
+                val expectedIndex = index
+                println("Hover highlight applied: index=$index range=${range.first}-${range.last}")
+                logger.warn("Hover highlight applied: index=$index range=${range.first}-${range.last}")
+                projectFocus.requestFocus(editor.contentComponent, true)
+                editor.caretModel.moveToOffset(offset)
+                scrollAlarm.cancelAllRequests()
+                scrollAlarm.addRequest({
+                    if (expectedEditor.isDisposed) {
+                        return@addRequest
+                    }
+                    if (hoverEditor != expectedEditor || lastHoverIndex != expectedIndex) {
+                        return@addRequest
+                    }
+                    if (!isOffsetVisible(expectedEditor, offset)) {
+                        expectedEditor.scrollingModel.scrollToCaret(ScrollType.CENTER)
+                    }
+                }, 500)
+                projectFocus.doWhenFocusSettlesDown {
+                    if (editor.isDisposed) {
+                        return@doWhenFocusSettlesDown
+                    }
+                    projectFocus.requestFocus(editor.contentComponent, true)
+                    editor.caretModel.moveToOffset(offset)
+                    scrollAlarm.cancelAllRequests()
+                    scrollAlarm.addRequest({
+                        if (expectedEditor.isDisposed) {
+                            return@addRequest
+                        }
+                        if (hoverEditor != expectedEditor || lastHoverIndex != expectedIndex) {
+                            return@addRequest
+                        }
+                        if (!isOffsetVisible(expectedEditor, offset)) {
+                            expectedEditor.scrollingModel.scrollToCaret(ScrollType.CENTER)
+                        }
+                    }, 500)
+                }
+            }
         }
     }
 
@@ -263,5 +313,11 @@ class ModelViewerService(private val project: Project) {
             return ranges
         }
         return ranges
+    }
+
+    private fun isOffsetVisible(editor: Editor, offset: Int): Boolean {
+        val visualPos = editor.offsetToVisualPosition(offset)
+        val point = editor.visualPositionToXY(visualPos)
+        return editor.scrollingModel.visibleArea.contains(point)
     }
 }
