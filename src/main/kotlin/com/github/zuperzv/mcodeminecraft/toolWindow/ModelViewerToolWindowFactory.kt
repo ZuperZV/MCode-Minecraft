@@ -479,7 +479,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         let originalMaterialColors = new WeakMap()
         const viewModeDefaults = new WeakMap()
         const hoverState = { object: null }
-        const selectedState = { object: null, outline: null }
+        const selectedState = { objects: new Set(), outlines: new Map() }
         let hoverDebugLogged = false
         let viewMode = "textured"
         let gridEnabled = false
@@ -933,40 +933,74 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             })
         }
 
-        function clearSelection(){
-            const selected = selectedState.object
-            if(selected && selected !== hoverState.object){
-                setMeshHighlight(selected, false)
-            }
-            if(selectedState.outline){
-                scene.remove(selectedState.outline)
-                selectedState.outline.geometry.dispose()
-                if(selectedState.outline.material.dispose){
-                    selectedState.outline.material.dispose()
-                }
-                selectedState.outline = null
-            }
-            selectedState.object = null
+        function isSelected(mesh){
+            return selectedState.objects.has(mesh)
         }
 
-        function setSelection(mesh){
-            if(selectedState.object === mesh){
+        function removeSelection(mesh){
+            if(!selectedState.objects.has(mesh)){
                 return
             }
-            clearSelection()
-            selectedState.object = mesh
+            if(mesh !== hoverState.object){
+                setMeshHighlight(mesh, false)
+            }
+            const outline = selectedState.outlines.get(mesh)
+            if(outline){
+                scene.remove(outline)
+                if(outline.children && outline.children.length){
+                    outline.children.forEach(child=>{
+                        if(child.geometry && child.geometry.dispose){
+                            child.geometry.dispose()
+                        }
+                        if(child.material && child.material.dispose){
+                            child.material.dispose()
+                        }
+                    })
+                }else{
+                    if(outline.geometry && outline.geometry.dispose){
+                        outline.geometry.dispose()
+                    }
+                    if(outline.material && outline.material.dispose){
+                        outline.material.dispose()
+                    }
+                }
+                selectedState.outlines.delete(mesh)
+            }
+            selectedState.objects.delete(mesh)
+        }
+
+        function clearSelection(){
+            const selectedMeshes = Array.from(selectedState.objects)
+            selectedMeshes.forEach(mesh=>removeSelection(mesh))
+        }
+
+        function addSelection(mesh){
+            if(selectedState.objects.has(mesh)){
+                return
+            }
+            selectedState.objects.add(mesh)
             setMeshHighlight(mesh, true)
-            const outlineGeom = new THREE.EdgesGeometry(mesh.geometry, 30)
-            const outlineMat = new THREE.LineBasicMaterial({ color: 0x3674c8})
-            const outline = new THREE.LineSegments(outlineGeom, outlineMat)
+            const outlineGroup = new THREE.Group()
+            const outlineScales = [1.0025, 1.01, 1.0175]
+            outlineScales.forEach((scale, index)=>{
+                const outlineGeom = new THREE.EdgesGeometry(mesh.geometry, 30)
+                const outlineMat = new THREE.LineBasicMaterial({
+                    color: 0x3674c8,
+                    transparent: true,
+                    opacity: index === 0 ? 0.95 : 0.45
+                })
+                const outline = new THREE.LineSegments(outlineGeom, outlineMat)
+                outline.position.copy(mesh.position)
+                outline.rotation.copy(mesh.rotation)
+                outline.scale.copy(mesh.scale).multiplyScalar(scale)
+                outline.renderOrder = 10
+                outline.userData.ignoreViewMode = true
+                outlineGroup.add(outline)
+            })
             mesh.updateMatrixWorld()
-            outline.position.copy(mesh.position)
-            outline.rotation.copy(mesh.rotation)
-            outline.scale.copy(mesh.scale).multiplyScalar(1.0025)
-            outline.renderOrder = 10
-            outline.userData.ignoreViewMode = true
-            scene.add(outline)
-            selectedState.outline = outline
+            outlineGroup.renderOrder = 10
+            scene.add(outlineGroup)
+            selectedState.outlines.set(mesh, outlineGroup)
         }
 
         function applyViewMode(mode){
@@ -1070,7 +1104,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             const hits = raycaster.intersectObjects(pickableMeshes, false)
             const next = hits.length ? hits[0].object : null
             if(next === hoverState.object) return
-            if(hoverState.object && hoverState.object !== selectedState.object){
+            if(hoverState.object && !isSelected(hoverState.object)){
                 setMeshHighlight(hoverState.object, false)
             }
             if(next){
@@ -1320,9 +1354,20 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                     updatePointerFromEvent(e)
                     raycaster.setFromCamera(pointer, camera)
                     const hits = raycaster.intersectObjects(pickableMeshes, false)
+                    const isMultiSelect = e.ctrlKey
                     if(hits.length){
-                        setSelection(hits[0].object)
-                    }else{
+                        const target = hits[0].object
+                        if(isMultiSelect){
+                            if(isSelected(target)){
+                                removeSelection(target)
+                            }else{
+                                addSelection(target)
+                            }
+                        }else{
+                            clearSelection()
+                            addSelection(target)
+                        }
+                    }else if(!isMultiSelect){
                         clearSelection()
                     }
                 }
@@ -1364,7 +1409,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         canvas.addEventListener("mouseleave", ()=>{
             hasPointer = false
             if(hoverState.object){
-                if(hoverState.object !== selectedState.object){
+                if(!isSelected(hoverState.object)){
                     setMeshHighlight(hoverState.object, false)
                 }
                 hoverState.object = null

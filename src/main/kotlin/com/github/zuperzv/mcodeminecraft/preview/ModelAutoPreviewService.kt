@@ -1,6 +1,8 @@
 package com.github.zuperzv.mcodeminecraft.preview
 
+import com.github.zuperzv.mcodeminecraft.services.AssetServer
 import com.github.zuperzv.mcodeminecraft.services.ModelViewerService
+import com.github.zuperzv.mcodeminecraft.util.AssetRootResolver
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.editor.EditorFactory
 import com.intellij.openapi.editor.event.DocumentEvent
@@ -54,6 +56,7 @@ class ModelAutoPreviewService(private val project: Project) {
                         return
                     }
                     activeJsonFile = file
+                    AssetRootResolver.findAssetsRoot(file)?.let { AssetServer.addRoot(it) }
                     project.getService(ModelViewerService::class.java)
                         .setActiveModelFile(file)
                     val editor = (event.newEditor as? com.intellij.openapi.fileEditor.TextEditor)?.editor
