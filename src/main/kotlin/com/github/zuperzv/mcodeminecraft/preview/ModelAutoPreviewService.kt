@@ -27,6 +27,7 @@ class ModelAutoPreviewService(private val project: Project) {
                 override fun documentChanged(event: DocumentEvent) {
                     val file = FileDocumentManager.getInstance().getFile(event.document) ?: return
                     if (file != activeJsonFile || file.extension != "json") return
+                    if (project.getService(ModelViewerService::class.java).isSuppressingPreview()) return
                     try {
                         project.getService(ModelViewerService::class.java)
                             .loadModel(event.document.text, resetCamera = false)

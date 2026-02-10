@@ -29,6 +29,7 @@ object AssetServer {
                 "png" -> "image/png"
                 "jpg", "jpeg" -> "image/jpeg"
                 "json" -> "application/json"
+                "js" -> "application/javascript"
                 "txt" -> "text/plain"
                 else -> "application/octet-stream"
             }

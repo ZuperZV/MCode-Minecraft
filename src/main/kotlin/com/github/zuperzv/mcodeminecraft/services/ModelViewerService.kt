@@ -1,7 +1,9 @@
 package com.github.zuperzv.mcodeminecraft.services
 
+import com.google.gson.JsonParser
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.markup.EffectType
 import com.intellij.openapi.editor.markup.HighlighterLayer
@@ -24,6 +26,7 @@ import org.cef.browser.CefFrame
 import org.cef.handler.CefLoadHandlerAdapter
 import java.awt.Color
 import java.awt.Font
+import java.math.BigDecimal
 
 @Service(Service.Level.PROJECT)
 class ModelViewerService(private val project: Project) {
@@ -43,16 +46,31 @@ class ModelViewerService(private val project: Project) {
     private var pendingViewMode: String? = null
     private var pendingOrthographic: Boolean? = null
     private var pendingGridEnabled: Boolean? = null
+    private var pendingTransformMode: String? = null
+    private var pendingTransformSpace: String? = null
+    private var pendingTransformAxis: String? = null
+    private var pendingTransformSnap: Double? = null
     private var viewMode: String = "textured"
     private var orthographic: Boolean = false
     private var gridEnabled: Boolean = false
+    private var transformMode: String = "translate"
+    private var transformSpace: String = "local"
+    private var transformAxis: String = "y"
+    private var transformSnap: Double = 1.0
     private var activeModelFile: com.intellij.openapi.vfs.VirtualFile? = null
     private var activeModelEditor: Editor? = null
     private var hoverQuery: JBCefJSQuery? = null
+    private var transformQuery: JBCefJSQuery? = null
+    private var selectionQuery: JBCefJSQuery? = null
     private var hoverHighlighter: RangeHighlighter? = null
     private var hoverEditor: Editor? = null
     private var lastHoverIndex: Int? = null
+    private var selectedHighlighter: RangeHighlighter? = null
+    private var selectedEditor: Editor? = null
+    private var selectedIndex: Int? = null
     private val scrollAlarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, project)
+    @Volatile
+    private var suppressAutoPreview = false
 
     init {
         val stored = settings.state
@@ -66,12 +84,28 @@ class ModelViewerService(private val project: Project) {
         browser = b
         pageReady = false
         hoverQuery?.dispose()
+        transformQuery?.dispose()
+        selectionQuery?.dispose()
         @Suppress("DEPRECATION")
         hoverQuery = JBCefJSQuery.create(b).apply {
             addHandler { query ->
                 println("Hover query received: $query")
                 logger.warn("Hover query received: $query")
                 handleHoverRequest(query)
+                null
+            }
+        }
+        @Suppress("DEPRECATION")
+        transformQuery = JBCefJSQuery.create(b).apply {
+            addHandler { query ->
+                handleTransformUpdate(query)
+                null
+            }
+        }
+        @Suppress("DEPRECATION")
+        selectionQuery = JBCefJSQuery.create(b).apply {
+            addHandler { query ->
+                handleSelectionUpdate(query)
                 null
             }
         }
@@ -89,6 +123,10 @@ class ModelViewerService(private val project: Project) {
                         pendingViewMode = viewMode
                         pendingOrthographic = orthographic
                         pendingGridEnabled = gridEnabled
+                        pendingTransformMode = transformMode
+                        pendingTransformSpace = transformSpace
+                        pendingTransformAxis = transformAxis
+                        pendingTransformSnap = transformSnap
                         pendingJson?.let {
                             loadModel(it)
                             pendingJson = null
@@ -105,6 +143,22 @@ class ModelViewerService(private val project: Project) {
                             setGridEnabled(enabled)
                             pendingGridEnabled = null
                         }
+                        pendingTransformMode?.let { mode ->
+                            setTransformMode(mode)
+                            pendingTransformMode = null
+                        }
+                        pendingTransformSpace?.let { space ->
+                            setTransformSpace(space)
+                            pendingTransformSpace = null
+                        }
+                        pendingTransformAxis?.let { axis ->
+                            setTransformAxis(axis)
+                            pendingTransformAxis = null
+                        }
+                        pendingTransformSnap?.let { snap ->
+                            setTransformSnap(snap)
+                            pendingTransformSnap = null
+                        }
                     }
                 }
             },
@@ -120,6 +174,22 @@ class ModelViewerService(private val project: Project) {
         return hoverQuery?.inject(functionName) ?: ""
     }
 
+    fun getTransformQueryInjection(functionName: String): String {
+        if (transformQuery == null) {
+            println("Transform query not ready; injection skipped")
+            logger.warn("Transform query not ready; injection skipped")
+        }
+        return transformQuery?.inject(functionName) ?: ""
+    }
+
+    fun getSelectionQueryInjection(functionName: String): String {
+        if (selectionQuery == null) {
+            println("Selection query not ready; injection skipped")
+            logger.warn("Selection query not ready; injection skipped")
+        }
+        return selectionQuery?.inject(functionName) ?: ""
+    }
+
     fun setActiveModelFile(file: com.intellij.openapi.vfs.VirtualFile?) {
         activeModelFile = file
     }
@@ -130,8 +200,6 @@ class ModelViewerService(private val project: Project) {
 
     fun loadModel(json: String, resetCamera: Boolean = true) {
         println("loadModel called")
-
-        pageReady = true
 
         if (browser == null || !pageReady) {
             println("Viewer not ready -> queue")
@@ -165,6 +233,10 @@ class ModelViewerService(private val project: Project) {
         return gridEnabled
     }
 
+    fun isSuppressingPreview(): Boolean {
+        return suppressAutoPreview
+    }
+
     fun setViewMode(mode: String) {
         val normalized = normalizeViewMode(mode)
         viewMode = normalized
@@ -196,6 +268,46 @@ class ModelViewerService(private val project: Project) {
         runViewerScript("window.setGridEnabled && window.setGridEnabled(${enabled});")
     }
 
+    fun setTransformMode(mode: String) {
+        val normalized = normalizeTransformMode(mode)
+        transformMode = normalized
+        if (browser == null || !pageReady) {
+            pendingTransformMode = normalized
+            return
+        }
+        runViewerScript("window.setTransformMode && window.setTransformMode('$normalized');")
+    }
+
+    fun setTransformSpace(space: String) {
+        val normalized = normalizeTransformSpace(space)
+        transformSpace = normalized
+        if (browser == null || !pageReady) {
+            pendingTransformSpace = normalized
+            return
+        }
+        runViewerScript("window.setTransformSpace && window.setTransformSpace('$normalized');")
+    }
+
+    fun setTransformAxis(axis: String) {
+        val normalized = normalizeTransformAxis(axis)
+        transformAxis = normalized
+        if (browser == null || !pageReady) {
+            pendingTransformAxis = normalized
+            return
+        }
+        runViewerScript("window.setTransformAxis && window.setTransformAxis('$normalized');")
+    }
+
+    fun setTransformSnap(snap: Double) {
+        val normalized = if (snap.isFinite() && snap > 0) snap else 1.0
+        transformSnap = normalized
+        if (browser == null || !pageReady) {
+            pendingTransformSnap = normalized
+            return
+        }
+        runViewerScript("window.setTransformSnap && window.setTransformSnap(${normalized});")
+    }
+
     fun resetCamera() {
         if (browser == null || !pageReady) {
             return
@@ -219,12 +331,209 @@ class ModelViewerService(private val project: Project) {
         }
     }
 
+    private fun normalizeTransformMode(mode: String): String {
+        return when {
+            mode.equals("rotate", true) -> "rotate"
+            mode.equals("scale", true) -> "scale"
+            else -> "translate"
+        }
+    }
+
+    private fun normalizeTransformSpace(space: String): String {
+        return if (space.equals("world", true)) "world" else "local"
+    }
+
+    private fun normalizeTransformAxis(axis: String): String {
+        return when {
+            axis.equals("x", true) -> "x"
+            axis.equals("y", true) -> "y"
+            axis.equals("z", true) -> "z"
+            else -> "y"
+        }
+    }
+
     fun clearHoverHighlight() {
         hoverHighlighter?.dispose()
         hoverHighlighter = null
         hoverEditor = null
         lastHoverIndex = null
+        applySelectedHighlight()
     }
+
+    private fun clearSelectedHighlight() {
+        selectedHighlighter?.dispose()
+        selectedHighlighter = null
+        selectedEditor = null
+    }
+
+    private fun applySelectedHighlight() {
+        val index = selectedIndex ?: run {
+            clearSelectedHighlight()
+            return
+        }
+        if (hoverHighlighter != null) {
+            clearSelectedHighlight()
+            return
+        }
+        val editor = resolveHoverEditor()
+        if (editor == null || editor.isDisposed) {
+            clearSelectedHighlight()
+            return
+        }
+        val ranges = findElementRanges(editor.document.text)
+        if (index < 0 || index >= ranges.size) {
+            clearSelectedHighlight()
+            return
+        }
+        val range = ranges[index]
+        if (selectedEditor != editor) {
+            clearSelectedHighlight()
+        }
+        if (selectedHighlighter == null || selectedEditor != editor) {
+            val attrs = TextAttributes(
+                null,
+                TEXT_HIGHLIGHT_TEXT,
+                null,
+                EffectType.BOXED,
+                Font.PLAIN
+            )
+            selectedHighlighter = editor.markupModel.addRangeHighlighter(
+                range.first,
+                range.last + 1,
+                HighlighterLayer.SELECTION - 2,
+                attrs,
+                HighlighterTargetArea.EXACT_RANGE
+            )
+            selectedEditor = editor
+        }
+    }
+
+    private fun handleTransformUpdate(payload: String) {
+        val root = try {
+            JsonParser.parseString(payload).asJsonObject
+        } catch (e: Exception) {
+            logger.warn("Transform update parse failed: $payload", e)
+            return
+        }
+        val index = root.get("index")?.asInt ?: return
+        val fromValues = readVector(root, "from") ?: return
+        val toValues = readVector(root, "to") ?: return
+        val rotationObj = root.get("rotation")?.takeIf { it.isJsonObject }?.asJsonObject
+        val rotation = rotationObj?.let { obj ->
+            val origin = readVector(obj, "origin")
+            val axis = obj.get("axis")?.asString
+            val angle = obj.get("angle")?.asDouble
+            if (origin == null || axis.isNullOrBlank() || angle == null) {
+                null
+            } else {
+                RotationUpdate(angle, axis, origin)
+            }
+        }
+        val editor = resolveActiveEditorForUpdate() ?: return
+        ApplicationManager.getApplication().invokeLater {
+            if (editor.isDisposed) {
+                return@invokeLater
+            }
+            suppressAutoPreview = true
+            try {
+                WriteCommandAction.runWriteCommandAction(project) {
+                    val document = editor.document
+                    val text = document.text
+                    val ranges = findElementRanges(text)
+                    if (index < 0 || index >= ranges.size) {
+                        return@runWriteCommandAction
+                    }
+                    val range = ranges[index]
+                    val elementText = text.substring(range.first, range.last + 1)
+                    var updatedElement = replaceArray(elementText, "from", fromValues)
+                    updatedElement = replaceArray(updatedElement, "to", toValues)
+                    updatedElement = updateRotationBlock(updatedElement, rotation)
+                    if (updatedElement == elementText) {
+                        return@runWriteCommandAction
+                    }
+                    document.replaceString(range.first, range.last + 1, updatedElement)
+                }
+            } finally {
+                suppressAutoPreview = false
+            }
+        }
+    }
+
+    private data class RotationUpdate(
+        val angle: Double,
+        val axis: String,
+        val origin: DoubleArray
+    )
+
+    private fun replaceArray(text: String, key: String, values: DoubleArray): String {
+        val numbers = values.joinToString(", ") { formatNumber(it) }
+        val pattern = Regex("(?s)(\"$key\"\\s*:\\s*)\\[[\\s\\S]*?\\]")
+        return pattern.replace(text) { match ->
+            "${match.groupValues[1]}[$numbers]"
+        }
+    }
+
+    private fun updateRotationBlock(text: String, rotation: RotationUpdate?): String {
+        if (rotation == null) {
+            return text
+        }
+        val rotationPattern = Regex("(?s)\"rotation\"\\s*:\\s*\\{[\\s\\S]*?\\}")
+        val match = rotationPattern.find(text)
+        val originNumbers = rotation.origin.joinToString(", ") { formatNumber(it) }
+        if (match == null) {
+            val facesMatch = Regex("\\n(\\s*)\"faces\"").find(text) ?: return text
+            val indent = facesMatch.groupValues[1]
+            val rotationInline =
+                "\"rotation\": {\"angle\": ${formatNumber(rotation.angle)}, \"axis\": \"${rotation.axis}\", \"origin\": [$originNumbers]},"
+            return text.replaceRange(
+                facesMatch.range.first,
+                facesMatch.range.first,
+                "\n$indent$rotationInline"
+            )
+        }
+        var block = match.value
+        block = Regex("(\"angle\"\\s*:\\s*)-?\\d+(?:\\.\\d+)?")
+            .replace(block) { m -> "${m.groupValues[1]}${formatNumber(rotation.angle)}" }
+        block = Regex("(\"axis\"\\s*:\\s*)\"[^\"]*\"")
+            .replace(block) { m -> "${m.groupValues[1]}\"${rotation.axis}\"" }
+        block = Regex("(?s)(\"origin\"\\s*:\\s*)\\[[\\s\\S]*?\\]")
+            .replace(block) { m -> "${m.groupValues[1]}[$originNumbers]" }
+        return text.replaceRange(match.range, block)
+    }
+
+    private fun formatNumber(value: Double): String {
+        return BigDecimal.valueOf(value)
+            .stripTrailingZeros()
+            .toPlainString()
+    }
+
+    private fun handleSelectionUpdate(request: String) {
+        val trimmed = request.trim()
+        if (trimmed.isEmpty() || trimmed == "null" || trimmed == "undefined") {
+            selectedIndex = null
+            clearSelectedHighlight()
+            return
+        }
+        val index = trimmed.toIntOrNull()
+        if (index == null || index < 0) {
+            selectedIndex = null
+            clearSelectedHighlight()
+            return
+        }
+        selectedIndex = index
+        applySelectedHighlight()
+    }
+
+    private fun readVector(root: com.google.gson.JsonObject, name: String): DoubleArray? {
+        val array = root.getAsJsonArray(name) ?: return null
+        if (array.size() < 3) return null
+        return doubleArrayOf(
+            array[0].asDouble,
+            array[1].asDouble,
+            array[2].asDouble
+        )
+    }
+
 
     private fun handleHoverRequest(request: String) {
         println("Hover request raw: '$request'")
@@ -270,6 +579,7 @@ class ModelViewerService(private val project: Project) {
                 }
                 if (hoverEditor != editor || lastHoverIndex != index) {
                     clearHoverHighlight()
+                    clearSelectedHighlight()
                     val attrs = TextAttributes(
                         null,
                         TEXT_HIGHLIGHT_TEXT,
@@ -348,6 +658,10 @@ class ModelViewerService(private val project: Project) {
             it is TextEditor
         } as? TextEditor
         return editor?.editor ?: selected
+    }
+
+    private fun resolveActiveEditorForUpdate(): Editor? {
+        return resolveHoverEditor()
     }
 
     private fun findElementRanges(text: String): List<IntRange> {

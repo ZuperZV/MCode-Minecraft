@@ -24,6 +24,7 @@ import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.actionSystem.ToggleAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.project.DumbAwareAction
+import com.intellij.openapi.ui.ComboBox
 import org.intellij.lang.annotations.Language
 import java.io.File
 import java.awt.BorderLayout
@@ -34,6 +35,8 @@ import java.awt.Graphics
 import java.awt.Graphics2D
 import java.awt.RenderingHints
 import java.awt.geom.RoundRectangle2D
+import java.awt.event.FocusAdapter
+import java.awt.event.FocusEvent
 import javax.swing.UIManager
 import javax.swing.plaf.basic.BasicSplitPaneDivider
 import javax.swing.plaf.basic.BasicSplitPaneUI
@@ -113,7 +116,60 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         }
         viewerContainer.isOpaque = false
         viewerContainer.border = JBUI.Borders.empty(52)
+
+        val transformToolbar = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(8), JBUI.scale(6)))
+        transformToolbar.isOpaque = false
+        val modeBox = ComboBox(arrayOf("Move", "Rotate", "Scale"))
+        val spaceBox = ComboBox(arrayOf("Local", "World"))
+        val axisBox = ComboBox(arrayOf("X", "Y", "Z"))
+        axisBox.selectedItem = "Y"
+        val snapField = JBTextField("1").apply { columns = 4 }
+        transformToolbar.add(JBLabel("Mode"))
+        transformToolbar.add(modeBox)
+        transformToolbar.add(JBLabel("Space"))
+        transformToolbar.add(spaceBox)
+        transformToolbar.add(JBLabel("Axis"))
+        transformToolbar.add(axisBox)
+        transformToolbar.add(JBLabel("Snap"))
+        transformToolbar.add(snapField)
+        transformToolbar.add(JBLabel("Shift=0.25"))
+        viewerContainer.add(transformToolbar, BorderLayout.NORTH)
         viewerContainer.add(viewerPanel, BorderLayout.CENTER)
+
+        fun updateSnapFromField() {
+            val value = snapField.text.trim().toDoubleOrNull()
+            if (value != null && value > 0) {
+                viewerService.setTransformSnap(value)
+            }
+        }
+
+        modeBox.addActionListener {
+            val selected = modeBox.selectedItem as? String ?: "Move"
+            val mode = when (selected) {
+                "Rotate" -> "rotate"
+                "Scale" -> "scale"
+                else -> "translate"
+            }
+            axisBox.isEnabled = mode == "rotate"
+            viewerService.setTransformMode(mode)
+        }
+        spaceBox.addActionListener {
+            val selected = spaceBox.selectedItem as? String ?: "Local"
+            val space = if (selected.equals("World", true)) "world" else "local"
+            viewerService.setTransformSpace(space)
+        }
+        axisBox.addActionListener {
+            val selected = axisBox.selectedItem as? String ?: "Y"
+            val axis = selected.lowercase()
+            viewerService.setTransformAxis(axis)
+        }
+        snapField.addActionListener { updateSnapFromField() }
+        snapField.addFocusListener(object : FocusAdapter() {
+            override fun focusLost(e: FocusEvent) {
+                updateSnapFromField()
+            }
+        })
+        axisBox.isEnabled = false
 
         val browser = if (JBCefApp.isSupported()) {
             try {
@@ -304,9 +360,14 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
 
         browser?.let {
             val hoverInjection = viewerService.getHoverQueryInjection("hoverElement")
+            val transformInjection = viewerService.getTransformQueryInjection("transformUpdate")
+            val selectionInjection = viewerService.getSelectionQueryInjection("selectElement")
             println("Hover injection length: " + hoverInjection.length)
             println("Hover injection: " + hoverInjection)
-            it.loadHTML(viewerHtml(projectRoot, assetServerPort, hoverInjection), "http://localhost/")
+            it.loadHTML(
+                viewerHtml(projectRoot, assetServerPort, hoverInjection, transformInjection, selectionInjection),
+                "http://localhost/"
+            )
             it.openDevtools()
         }
 
@@ -314,12 +375,19 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
     }
 
     @Language("HTML")
-    private fun viewerHtml(projectRoot: String, assetPort: Int, hoverInjection: String) = """
+    private fun viewerHtml(
+        projectRoot: String,
+        assetPort: Int,
+        hoverInjection: String,
+        transformInjection: String,
+        selectionInjection: String
+    ) = """
         <html>
         <body style="margin:0; overflow:hidden;">
         <canvas id="c"></canvas>
         
         <script src="https://cdn.jsdelivr.net/npm/three@0.160/build/three.min.js"></script>
+        <script src="http://localhost:$assetPort/assets/lib/TransformControls.js"></script>
         
         <script>
         console.log("Viewer JS running")
@@ -327,6 +395,14 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         const sendHover = (msg)=>{
             const hoverElement = msg
             ;$hoverInjection;
+        }
+        const sendTransformUpdate = (payload)=>{
+            const transformUpdate = payload
+            ;$transformInjection;
+        }
+        const sendSelectionUpdate = (msg)=>{
+            const selectElement = msg
+            ;$selectionInjection;
         }
         console.log("sendHover type:", typeof sendHover)
         let hoverHandshakeSent = false
@@ -387,6 +463,9 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             if(gridMesh){
                 preserved.add(gridMesh)
             }
+            if(transformControls){
+                preserved.add(transformControls)
+            }
             for(let i = scene.children.length - 1; i >= 0; i--){
                 const child = scene.children[i]
                 if(!preserved.has(child)){
@@ -422,6 +501,14 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             toCamera.lookAt(orbitTarget)
             useOrthographic = next
             camera = toCamera
+            if(transformControls){
+                transformControls.camera = camera
+                if(typeof transformControls.update === "function"){
+                    transformControls.update()
+                }else if(typeof transformControls.updateMatrixWorld === "function"){
+                    transformControls.updateMatrixWorld(true)
+                }
+            }
             if(useOrthographic){
                 updateOrthoFrustum()
                 orthoCamera.updateProjectionMatrix()
@@ -479,10 +566,52 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         let originalMaterialColors = new WeakMap()
         const viewModeDefaults = new WeakMap()
         const hoverState = { object: null }
-        const selectedState = { objects: new Set(), outlines: new Map() }
+        const selectedState = { objects: new Set(), outlines: new Map(), active: null }
+        let transformControls = null
+        let transformMode = "translate"
+        let transformSpace = "local"
+        let transformAxis = "y"
+        let snapStep = 1
+        let isShiftDown = false
+        let isTransforming = false
+        let wasTransforming = false
+        let sourceModel = null
+        let sourceElements = null
         let hoverDebugLogged = false
         let viewMode = "textured"
         let gridEnabled = false
+
+        function initTransformControls(){
+            if(transformControls){
+                return
+            }
+            if(!THREE.TransformControls){
+                console.warn("TransformControls not available; gizmo disabled")
+                return
+            }
+            transformControls = new THREE.TransformControls(camera, renderer.domElement)
+            transformControls.setMode(transformMode)
+            transformControls.setSpace(transformSpace)
+            updateTransformSnaps()
+            updateTransformAxisVisibility()
+            transformControls.addEventListener("dragging-changed", (event)=>{
+                isTransforming = event.value
+                if(event.value){
+                    wasTransforming = true
+                }else if(wasTransforming){
+                    commitTransformUpdate()
+                    wasTransforming = false
+                }
+            })
+            scene.add(transformControls)
+            updateTransformAttachment()
+        }
+
+        if(THREE.TransformControls){
+            initTransformControls()
+        }else{
+            console.warn("TransformControls not available; gizmo disabled")
+        }
 
         function resolveTexture(texString){
             texString = texString.replace("#","")
@@ -933,6 +1062,28 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             })
         }
 
+        function updateTransformAttachment(){
+            if(!transformControls) return
+            if(selectedState.active){
+                transformControls.attach(selectedState.active)
+                transformControls.visible = true
+                if(typeof transformControls.update === "function"){
+                    transformControls.update()
+                }else if(typeof transformControls.updateMatrixWorld === "function"){
+                    transformControls.updateMatrixWorld(true)
+                }
+            }else{
+                transformControls.detach()
+                transformControls.visible = false
+            }
+        }
+
+        function notifySelectionChanged(){
+            if(!sendSelectionUpdate) return
+            const idx = selectedState.active?.userData?.elementIndex
+            sendSelectionUpdate(String(Number.isInteger(idx) ? idx : -1))
+        }
+
         function isSelected(mesh){
             return selectedState.objects.has(mesh)
         }
@@ -967,11 +1118,19 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 selectedState.outlines.delete(mesh)
             }
             selectedState.objects.delete(mesh)
+            if(selectedState.active === mesh){
+                selectedState.active = selectedState.objects.values().next().value || null
+                updateTransformAttachment()
+                notifySelectionChanged()
+            }
         }
 
         function clearSelection(){
             const selectedMeshes = Array.from(selectedState.objects)
             selectedMeshes.forEach(mesh=>removeSelection(mesh))
+            selectedState.active = null
+            updateTransformAttachment()
+            notifySelectionChanged()
         }
 
         function addSelection(mesh){
@@ -1001,6 +1160,121 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             outlineGroup.renderOrder = 10
             scene.add(outlineGroup)
             selectedState.outlines.set(mesh, outlineGroup)
+            selectedState.active = mesh
+            updateTransformAttachment()
+            notifySelectionChanged()
+        }
+
+        function updateTransformAxisVisibility(){
+            if(!transformControls) return
+            if(transformMode !== "rotate"){
+                transformControls.showX = true
+                transformControls.showY = true
+                transformControls.showZ = true
+                return
+            }
+            transformControls.showX = transformAxis === "x"
+            transformControls.showY = transformAxis === "y"
+            transformControls.showZ = transformAxis === "z"
+        }
+
+        function updateTransformSnaps(){
+            if(!transformControls) return
+            const snap = isShiftDown ? 0.25 : snapStep
+            transformControls.setTranslationSnap(snap)
+            transformControls.setScaleSnap(snap)
+            transformControls.setRotationSnap(THREE.MathUtils.degToRad(snap))
+        }
+
+        function roundValue(value){
+            return Math.round(value * 10000) / 10000
+        }
+
+        function roundVec(values){
+            return values.map(roundValue)
+        }
+
+        function commitTransformUpdate(){
+            const mesh = selectedState.active
+            if(!mesh || !sourceElements){
+                return
+            }
+            const index = mesh.userData?.elementIndex
+            if(index === undefined || index === null){
+                return
+            }
+            const element = sourceElements[index]
+            if(!element){
+                return
+            }
+            const oldCenter = new THREE.Vector3(
+                (element.from?.[0] ?? 0) + ((element.to?.[0] ?? 0) - (element.from?.[0] ?? 0)) / 2,
+                (element.from?.[1] ?? 0) + ((element.to?.[1] ?? 0) - (element.from?.[1] ?? 0)) / 2,
+                (element.from?.[2] ?? 0) + ((element.to?.[2] ?? 0) - (element.from?.[2] ?? 0)) / 2
+            )
+            const baseSize = mesh.userData?.baseSize
+            if(!baseSize){
+                return
+            }
+            const size = new THREE.Vector3(
+                baseSize.x * mesh.scale.x,
+                baseSize.y * mesh.scale.y,
+                baseSize.z * mesh.scale.z
+            )
+            const center = mesh.position.clone().add(currentModelCenter)
+            const delta = center.clone().sub(oldCenter)
+            const from = [
+                center.x - size.x / 2,
+                center.y - size.y / 2,
+                center.z - size.z / 2
+            ]
+            const to = [
+                center.x + size.x / 2,
+                center.y + size.y / 2,
+                center.z + size.z / 2
+            ]
+            const existingRotation = element.rotation ?? null
+            const axis = existingRotation?.axis ?? transformAxis
+            const angleRad = mesh.rotation[axis]
+            let rotation = null
+            const includeRotation = !!existingRotation || transformMode === "rotate"
+            if(includeRotation){
+                let origin = null
+                if(existingRotation?.origin && existingRotation.origin.length >= 3){
+                    origin = [
+                        existingRotation.origin[0] + delta.x,
+                        existingRotation.origin[1] + delta.y,
+                        existingRotation.origin[2] + delta.z
+                    ]
+                }else{
+                    origin = [center.x, center.y, center.z]
+                }
+                rotation = {
+                    origin: origin,
+                    axis: axis,
+                    angle: THREE.MathUtils.radToDeg(angleRad)
+                }
+            }
+            const payload = {
+                index: index,
+                from: roundVec(from),
+                to: roundVec(to),
+                rotation: rotation ? {
+                    origin: roundVec(rotation.origin),
+                    axis: rotation.axis,
+                    angle: roundValue(rotation.angle)
+                } : null
+            }
+            element.from = payload.from.slice()
+            element.to = payload.to.slice()
+            if(payload.rotation){
+                element.rotation = payload.rotation
+            }else if(element.rotation){
+                delete element.rotation
+            }
+            if(sendTransformUpdate){
+                sendTransformUpdate(JSON.stringify(payload))
+            }
         }
 
         function applyViewMode(mode){
@@ -1125,6 +1399,8 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
 
         window.loadModel = async function(model, resetCamera=true){
             clearScene()
+            sourceModel = model
+            sourceElements = Array.isArray(model?.elements) ? model.elements : null
             textures = {}
             animatedTextures = new Map()
 
@@ -1247,6 +1523,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                     mesh.rotateOnAxis(axisVec, angleRad)
                 }
                 mesh.userData.elementIndex = elementIndex
+                mesh.userData.baseSize = { x: sx, y: sy, z: sz }
                 scene.add(mesh)
                 pickableMeshes.push(mesh)
             })
@@ -1285,6 +1562,33 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             applyGridEnabled(enabled)
         }
 
+        window.setTransformMode = function(mode){
+            transformMode = (mode === "rotate" || mode === "scale") ? mode : "translate"
+            if(transformControls){
+                transformControls.setMode(transformMode)
+                updateTransformAxisVisibility()
+            }
+        }
+
+        window.setTransformSpace = function(space){
+            transformSpace = (space === "world") ? "world" : "local"
+            if(transformControls){
+                transformControls.setSpace(transformSpace)
+            }
+        }
+
+        window.setTransformAxis = function(axis){
+            transformAxis = (axis === "x" || axis === "y" || axis === "z") ? axis : "y"
+            updateTransformAxisVisibility()
+        }
+
+        window.setTransformSnap = function(value){
+            if(Number.isFinite(value) && value > 0){
+                snapStep = value
+                updateTransformSnaps()
+            }
+        }
+
         window.resetCamera = function(){
             resetCameraState()
         }
@@ -1304,6 +1608,20 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 console.log("Hover ping sent")
             }else{
                 console.log("Hover ping skipped; sendHover not available")
+            }
+        })
+
+        window.addEventListener("keydown", (e)=>{
+            if(e.key === "Shift"){
+                isShiftDown = true
+                updateTransformSnaps()
+            }
+        })
+
+        window.addEventListener("keyup", (e)=>{
+            if(e.key === "Shift"){
+                isShiftDown = false
+                updateTransformSnaps()
             }
         })
 
@@ -1347,6 +1665,10 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         window.addEventListener("mouseup", (e)=>{
             isDragging = false
             isPanning = false
+            if(wasTransforming){
+                wasTransforming = false
+                return
+            }
             if(clickStartButton === 0){
                 const dx = e.clientX - clickStartX
                 const dy = e.clientY - clickStartY
@@ -1384,6 +1706,10 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 sendHover("-1")
                 hoverHandshakeSent = true
                 console.log("Hover handshake sent")
+            }
+
+            if(isTransforming){
+                return
             }
 
             if(isDragging){
