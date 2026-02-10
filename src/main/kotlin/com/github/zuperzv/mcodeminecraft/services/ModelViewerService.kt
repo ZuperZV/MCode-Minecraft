@@ -1,6 +1,10 @@
 package com.github.zuperzv.mcodeminecraft.services
 
 import com.intellij.openapi.components.Service
+import com.intellij.openapi.components.State
+import com.intellij.openapi.components.Storage
+import com.intellij.openapi.components.StoragePathMacros
+import com.intellij.openapi.components.PersistentStateComponent
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.markup.EffectType
@@ -25,7 +29,17 @@ import java.awt.Color
 import java.awt.Font
 
 @Service(Service.Level.PROJECT)
-class ModelViewerService(private val project: Project) {
+@State(
+    name = "MCodeModelViewerState",
+    storages = [Storage(StoragePathMacros.WORKSPACE_FILE)]
+)
+class ModelViewerService(private val project: Project) : PersistentStateComponent<ModelViewerService.State> {
+
+    data class State(
+        var viewMode: String = "textured",
+        var orthographic: Boolean = false,
+        var gridEnabled: Boolean = false
+    )
 
     private val logger = Logger.getInstance(ModelViewerService::class.java)
 
@@ -44,6 +58,7 @@ class ModelViewerService(private val project: Project) {
     private var viewMode: String = "textured"
     private var orthographic: Boolean = false
     private var gridEnabled: Boolean = false
+    private var state: State = State()
     private var activeModelFile: com.intellij.openapi.vfs.VirtualFile? = null
     private var activeModelEditor: Editor? = null
     private var hoverQuery: JBCefJSQuery? = null
@@ -159,6 +174,7 @@ class ModelViewerService(private val project: Project) {
             else -> "textured"
         }
         viewMode = normalized
+        state.viewMode = normalized
         if (browser == null || !pageReady) {
             pendingViewMode = normalized
             return
@@ -168,6 +184,7 @@ class ModelViewerService(private val project: Project) {
 
     fun setOrthographic(enabled: Boolean) {
         orthographic = enabled
+        state.orthographic = enabled
         if (browser == null || !pageReady) {
             pendingOrthographic = enabled
             return
@@ -177,11 +194,37 @@ class ModelViewerService(private val project: Project) {
 
     fun setGridEnabled(enabled: Boolean) {
         gridEnabled = enabled
+        state.gridEnabled = enabled
         if (browser == null || !pageReady) {
             pendingGridEnabled = enabled
             return
         }
         runViewerScript("window.setGridEnabled && window.setGridEnabled(${enabled});")
+    }
+
+    override fun getState(): State {
+        return state
+    }
+
+    override fun loadState(state: State) {
+        val normalizedViewMode = when {
+            state.viewMode.equals("solid", true) -> "solid"
+            state.viewMode.equals("wireframe", true) -> "wireframe"
+            else -> "textured"
+        }
+        this.state = state.apply { viewMode = normalizedViewMode }
+        viewMode = normalizedViewMode
+        orthographic = state.orthographic
+        gridEnabled = state.gridEnabled
+        if (browser == null || !pageReady) {
+            pendingViewMode = viewMode
+            pendingOrthographic = orthographic
+            pendingGridEnabled = gridEnabled
+            return
+        }
+        runViewerScript("window.setViewMode && window.setViewMode('$viewMode');")
+        runViewerScript("window.setOrthographic && window.setOrthographic(${orthographic});")
+        runViewerScript("window.setGridEnabled && window.setGridEnabled(${gridEnabled});")
     }
 
     fun resetCamera() {

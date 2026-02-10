@@ -72,7 +72,6 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         dumpUiManagerKeysOnce()
 
-        project.getService(ModelAutoPreviewService::class.java)
         val viewerService = project.getService(ModelViewerService::class.java)
 
         val viewerPanel: JPanel = JPanel(BorderLayout())
@@ -87,7 +86,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                         RenderingHints.VALUE_ANTIALIAS_ON
                     )
                     val arc = JBUI.scale(52)
-                    val inset = JBUI.scale(30)
+                    val inset = JBUI.scale(20)
                     val rectWidth = width - inset * 2
                     val rectHeight = height - inset * 2
                     val clipShape = RoundRectangle2D.Float(
@@ -230,7 +229,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             }
         }
 
-        val gridAction = object : ToggleAction("Grid Box") {
+        val gridAction = object : ToggleAction("Grid") {
             init {
                 templatePresentation.icon = AllIcons.Graph.Grid
             }
