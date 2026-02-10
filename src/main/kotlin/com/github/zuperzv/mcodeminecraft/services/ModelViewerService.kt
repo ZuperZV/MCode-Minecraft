@@ -64,6 +64,7 @@ class ModelViewerService(private val project: Project) {
     fun setBrowser(b: JBCefBrowser) {
         println("Browser registered")
         browser = b
+        pageReady = false
         hoverQuery?.dispose()
         @Suppress("DEPRECATION")
         hoverQuery = JBCefJSQuery.create(b).apply {
@@ -129,8 +130,6 @@ class ModelViewerService(private val project: Project) {
 
     fun loadModel(json: String, resetCamera: Boolean = true) {
         println("loadModel called")
-
-        pageReady = true
 
         if (browser == null || !pageReady) {
             println("Viewer not ready -> queue")

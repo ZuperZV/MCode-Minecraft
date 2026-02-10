@@ -72,6 +72,8 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         dumpUiManagerKeysOnce()
 
+        project.getService(ModelAutoPreviewService::class.java)
+
         val viewerService = project.getService(ModelViewerService::class.java)
 
         val viewerPanel: JPanel = JPanel(BorderLayout())
