@@ -3,6 +3,7 @@ package com.github.zuperzv.mcodeminecraft.toolWindow
 import com.github.zuperzv.mcodeminecraft.preview.ModelAutoPreviewService
 import com.github.zuperzv.mcodeminecraft.services.AssetServer
 import com.github.zuperzv.mcodeminecraft.services.ModelViewerService
+import com.intellij.icons.AllIcons
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.wm.ToolWindow
@@ -18,6 +19,11 @@ import com.intellij.ui.components.JBTextField
 import com.intellij.ui.jcef.JBCefApp
 import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.util.ui.JBUI
+import com.intellij.openapi.actionSystem.ActionUpdateThread
+import com.intellij.openapi.actionSystem.DefaultActionGroup
+import com.intellij.openapi.actionSystem.ToggleAction
+import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.project.DumbAwareAction
 import org.intellij.lang.annotations.Language
 import java.io.File
 import java.awt.BorderLayout
@@ -27,6 +33,7 @@ import java.awt.FlowLayout
 import java.awt.Graphics
 import java.awt.Graphics2D
 import java.awt.RenderingHints
+import java.awt.geom.RoundRectangle2D
 import javax.swing.UIManager
 import javax.swing.plaf.basic.BasicSplitPaneDivider
 import javax.swing.plaf.basic.BasicSplitPaneUI
@@ -35,6 +42,7 @@ import javax.swing.BoxLayout
 import javax.swing.JButton
 import javax.swing.JPanel
 import javax.swing.JSplitPane
+import javax.swing.plaf.basic.BasicBorders
 
 class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
 
@@ -56,12 +64,16 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             JBColor(0x26282b, 0x26282b)
         )
 
+    val TEST_COLOR: Color =
+        JBColor(0x0066ff, 0x0066ff)
+
     private val logger = Logger.getInstance(ModelViewerToolWindowFactory::class.java)
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         dumpUiManagerKeysOnce()
 
         project.getService(ModelAutoPreviewService::class.java)
+        val viewerService = project.getService(ModelViewerService::class.java)
 
         val viewerPanel: JPanel = JPanel(BorderLayout())
         viewerPanel.isOpaque = false
@@ -78,14 +90,24 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                     val inset = JBUI.scale(30)
                     val rectWidth = width - inset * 2
                     val rectHeight = height - inset * 2
+                    val clipShape = RoundRectangle2D.Float(
+                        inset.toFloat(),
+                        inset.toFloat(),
+                        rectWidth.toFloat(),
+                        rectHeight.toFloat(),
+                        arc.toFloat(),
+                        arc.toFloat()
+                    )
                     g2.color = SELECTED_BACKGROUND_COLOR
-                    g2.fillRoundRect(inset, inset, rectWidth, rectHeight, arc, arc)
+                    g2.fill(clipShape)
+                    g2.clip = clipShape
+                    super.paintComponent(g)
+                    g2.clip = null
                     g2.color = JBColor.border()
-                    g2.drawRoundRect(inset, inset, rectWidth - 1, rectHeight - 1, arc, arc)
+                    g2.draw(clipShape)
                 } finally {
                     g2.dispose()
                 }
-                super.paintComponent(g)
             }
         }
         viewerContainer.isOpaque = false
@@ -95,7 +117,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         val browser = if (JBCefApp.isSupported()) {
             try {
                 JBCefBrowser().also {
-                    project.getService(ModelViewerService::class.java).setBrowser(it)
+                    viewerService.setBrowser(it)
                     viewerPanel.add(it.component, BorderLayout.CENTER)
                 }
             } catch (e: Exception) {
@@ -121,8 +143,6 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
 
         val actionsRow = JPanel(FlowLayout(FlowLayout.LEFT, 0, 0))
         actionsRow.add(JButton("Load"))
-        actionsRow.add(Box.createHorizontalStrut(6))
-        actionsRow.add(JButton("Reset camera"))
         controlsPanel.add(actionsRow)
         controlsPanel.add(Box.createVerticalStrut(6))
 
@@ -142,6 +162,108 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             }
         )
 
+        val viewModeGroupAction = DefaultActionGroup("View Mode", true).apply {
+            templatePresentation.icon = AllIcons.Actions.ChangeView
+        }
+        viewModeGroupAction.add(object : ToggleAction("Solid") {
+            override fun isSelected(e: AnActionEvent): Boolean {
+                return viewerService.getViewMode() == "solid"
+            }
+
+            override fun setSelected(e: AnActionEvent, state: Boolean) {
+                if (state) {
+                    viewerService.setViewMode("solid")
+                }
+            }
+
+            override fun getActionUpdateThread(): ActionUpdateThread {
+                return ActionUpdateThread.EDT
+            }
+        })
+        viewModeGroupAction.add(object : ToggleAction("Textured") {
+            override fun isSelected(e: AnActionEvent): Boolean {
+                return viewerService.getViewMode() == "textured"
+            }
+
+            override fun setSelected(e: AnActionEvent, state: Boolean) {
+                if (state) {
+                    viewerService.setViewMode("textured")
+                }
+            }
+
+            override fun getActionUpdateThread(): ActionUpdateThread {
+                return ActionUpdateThread.EDT
+            }
+        })
+        viewModeGroupAction.add(object : ToggleAction("Wireframe") {
+            override fun isSelected(e: AnActionEvent): Boolean {
+                return viewerService.getViewMode() == "wireframe"
+            }
+
+            override fun setSelected(e: AnActionEvent, state: Boolean) {
+                if (state) {
+                    viewerService.setViewMode("wireframe")
+                }
+            }
+
+            override fun getActionUpdateThread(): ActionUpdateThread {
+                return ActionUpdateThread.EDT
+            }
+        })
+
+        val orthographicAction = object : ToggleAction("Orthographic") {
+            init {
+                templatePresentation.icon = AllIcons.General.InspectionsEye
+            }
+
+
+            override fun isSelected(e: AnActionEvent): Boolean {
+                return viewerService.isOrthographic()
+            }
+
+            override fun setSelected(e: AnActionEvent, state: Boolean) {
+                viewerService.setOrthographic(state)
+            }
+
+            override fun getActionUpdateThread(): ActionUpdateThread {
+                return ActionUpdateThread.EDT
+            }
+        }
+
+        val gridAction = object : ToggleAction("Grid Box") {
+            init {
+                templatePresentation.icon = AllIcons.Graph.Grid
+            }
+
+            override fun isSelected(e: AnActionEvent): Boolean {
+                return viewerService.isGridEnabled()
+            }
+
+            override fun setSelected(e: AnActionEvent, state: Boolean) {
+                viewerService.setGridEnabled(state)
+            }
+
+            override fun getActionUpdateThread(): ActionUpdateThread {
+                return ActionUpdateThread.EDT
+            }
+        }
+
+        val resetCameraAction = object : DumbAwareAction(
+            "Reset Camera",
+            "Reset the camera to the default position",
+            AllIcons.Actions.Refresh
+        ) {
+            override fun actionPerformed(e: AnActionEvent) {
+                viewerService.resetCamera()
+            }
+
+            override fun getActionUpdateThread(): ActionUpdateThread {
+                return ActionUpdateThread.EDT
+            }
+        }
+
+        toolWindow.setTitleActions(listOf(viewModeGroupAction, orthographicAction, gridAction, resetCameraAction))
+
         val splitPane = JSplitPane(JSplitPane.VERTICAL_SPLIT, viewerContainer, controlsPanel)
 
         splitPane.resizeWeight = 0.7
@@ -154,7 +276,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 return object : BasicSplitPaneDivider(this) {
                     override fun paint(g: Graphics) {
                         g.color = BORDER_COLOR
-                        g.fillRect(0, 0, width, height)
+                        g.fillRect(0, 0, width, height + 10)
                     }
                 }.apply {
                 }
@@ -180,8 +302,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         }
 
         browser?.let {
-            val hoverInjection = project.getService(ModelViewerService::class.java)
-                .getHoverQueryInjection("hoverElement")
+            val hoverInjection = viewerService.getHoverQueryInjection("hoverElement")
             println("Hover injection length: " + hoverInjection.length)
             println("Hover injection: " + hoverInjection)
             it.loadHTML(viewerHtml(projectRoot, assetServerPort, hoverInjection), "http://localhost/")
@@ -217,24 +338,59 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         renderer.setPixelRatio(1) // Pixel-perfect
 
         const scene = new THREE.Scene()
-        const camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.1, 1000)
-        camera.position.set(40,40,40)
-        camera.lookAt(0,0,0)
         const DEFAULT_ORBIT_TARGET = new THREE.Vector3(0,0,0)
+        const DEFAULT_CAMERA_POS = new THREE.Vector3(40,40,40)
+        const DEFAULT_ORBIT_RADIUS = DEFAULT_CAMERA_POS.distanceTo(DEFAULT_ORBIT_TARGET)
+        const DEFAULT_ORBIT_THETA = Math.atan2(
+            DEFAULT_CAMERA_POS.z - DEFAULT_ORBIT_TARGET.z,
+            DEFAULT_CAMERA_POS.x - DEFAULT_ORBIT_TARGET.x
+        )
+        const DEFAULT_ORBIT_PHI = Math.acos(
+            (DEFAULT_CAMERA_POS.y - DEFAULT_ORBIT_TARGET.y) / DEFAULT_ORBIT_RADIUS
+        )
+        const DEFAULT_ORTHO_ZOOM = 1
+
+        const aspect = window.innerWidth / window.innerHeight
+        const perspectiveCamera = new THREE.PerspectiveCamera(70, aspect, 0.1, 1000)
+        const ORTHO_SIZE = 60
+        const orthoCamera = new THREE.OrthographicCamera(
+            -ORTHO_SIZE * aspect,
+            ORTHO_SIZE * aspect,
+            ORTHO_SIZE,
+            -ORTHO_SIZE,
+            0.1,
+            1000
+        )
+        perspectiveCamera.position.copy(DEFAULT_CAMERA_POS)
+        orthoCamera.position.copy(DEFAULT_CAMERA_POS)
+        perspectiveCamera.lookAt(DEFAULT_ORBIT_TARGET)
+        orthoCamera.lookAt(DEFAULT_ORBIT_TARGET)
+
+        let camera = perspectiveCamera
+        let useOrthographic = false
         let orbitTarget = DEFAULT_ORBIT_TARGET.clone()
         let currentModelCenter = DEFAULT_ORBIT_TARGET.clone()
-        let orbitRadius = camera.position.distanceTo(orbitTarget)
-        let orbitTheta = Math.atan2(camera.position.z - orbitTarget.z, camera.position.x - orbitTarget.x)
-        let orbitPhi = Math.acos((camera.position.y - orbitTarget.y) / orbitRadius)
+        let orbitRadius = DEFAULT_ORBIT_RADIUS
+        let orbitTheta = DEFAULT_ORBIT_THETA
+        let orbitPhi = DEFAULT_ORBIT_PHI
 
         const light = new THREE.DirectionalLight(0xffffff, 1)
+        const ambientLight = new THREE.AmbientLight(0x212121)
         light.position.set(50,50,50)
         scene.add(light)
-        scene.add(new THREE.AmbientLight(0x212121))
+        scene.add(ambientLight)
+        let gridMesh = null
 
         function clearScene(){
-            while(scene.children.length > 2){
-                scene.remove(scene.children[2])
+            const preserved = new Set([light, ambientLight])
+            if(gridMesh){
+                preserved.add(gridMesh)
+            }
+            for(let i = scene.children.length - 1; i >= 0; i--){
+                const child = scene.children[i]
+                if(!preserved.has(child)){
+                    scene.remove(child)
+                }
             }
             pickableMeshes.length = 0
             if(hoverState.object){
@@ -242,6 +398,48 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 hoverState.object = null
             }
         }
+
+        function updateOrthoFrustum(){
+            const aspect = window.innerWidth / window.innerHeight
+            orthoCamera.left = -ORTHO_SIZE * aspect
+            orthoCamera.right = ORTHO_SIZE * aspect
+            orthoCamera.top = ORTHO_SIZE
+            orthoCamera.bottom = -ORTHO_SIZE
+            orthoCamera.updateProjectionMatrix()
+        }
+
+        function applyOrthographic(enabled){
+            const next = !!enabled
+            if(next === useOrthographic){
+                return
+            }
+            const fromCamera = useOrthographic ? orthoCamera : perspectiveCamera
+            const toCamera = next ? orthoCamera : perspectiveCamera
+            toCamera.position.copy(fromCamera.position)
+            toCamera.up.copy(fromCamera.up)
+            toCamera.lookAt(orbitTarget)
+            useOrthographic = next
+            camera = toCamera
+            if(useOrthographic){
+                updateOrthoFrustum()
+                orthoCamera.updateProjectionMatrix()
+            }else{
+                perspectiveCamera.updateProjectionMatrix()
+            }
+            updateCameraFromOrbit()
+        }
+
+        function resetCameraState(){
+            orbitTarget = DEFAULT_ORBIT_TARGET.clone()
+            orbitRadius = DEFAULT_ORBIT_RADIUS
+            orbitTheta = DEFAULT_ORBIT_THETA
+            orbitPhi = DEFAULT_ORBIT_PHI
+            orthoCamera.zoom = DEFAULT_ORTHO_ZOOM
+            orthoCamera.updateProjectionMatrix()
+            updateCameraFromOrbit()
+        }
+
+        updateOrthoFrustum()
 
         function updateCameraFromOrbit(){
             const sinPhi = Math.sin(orbitPhi)
@@ -276,9 +474,12 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         const pointer = new THREE.Vector2()
         let hasPointer = false
         const pickableMeshes = []
-        const originalMaterialColors = new WeakMap()
+        let originalMaterialColors = new WeakMap()
+        const viewModeDefaults = new WeakMap()
         const hoverState = { object: null }
         let hoverDebugLogged = false
+        let viewMode = "textured"
+        let gridEnabled = false
 
         function resolveTexture(texString){
             texString = texString.replace("#","")
@@ -688,24 +889,22 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             }
         }
 
-        const HOVER_COLOR_BOOST = 0.35
+        const HOVER_COLOR_BOOST = 1.45
 
         function setMeshHighlight(mesh, enabled){
             const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
             mats.forEach(mat=>{
                 if(!mat || !mat.color) return
                 let base = originalMaterialColors.get(mat)
-                if(!base){
-                    base = {
-                        color: mat.color.clone(),
-                        emissive: mat.emissive ? mat.emissive.clone() : null,
-                        emissiveIntensity: Number.isFinite(mat.emissiveIntensity) ? mat.emissiveIntensity : null,
-                        vertexColors: mat.vertexColors,
-                        wireframe: mat.wireframe
-                    }
-                    originalMaterialColors.set(mat, base)
-                }
                 if(enabled){
+                    if(!base){
+                        base = {
+                            color: mat.color.clone(),
+                            emissive: mat.emissive ? mat.emissive.clone() : null,
+                            emissiveIntensity: Number.isFinite(mat.emissiveIntensity) ? mat.emissiveIntensity : null
+                        }
+                        originalMaterialColors.set(mat, base)
+                    }
                     mat.color.copy(base.color).multiplyScalar(HOVER_COLOR_BOOST)
                     if(mat.emissive){
                         if(base.emissive){
@@ -715,22 +914,115 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                         }
                         mat.emissiveIntensity = Math.max(0.8, base.emissiveIntensity ?? 0.8)
                     }
-                    mat.vertexColors = false
-                    mat.wireframe = false
                     mat.needsUpdate = true
                 }else{
-                    mat.color.copy(base.color)
-                    if(mat.emissive && base.emissive){
-                        mat.emissive.copy(base.emissive)
-                        if(base.emissiveIntensity !== null){
-                            mat.emissiveIntensity = base.emissiveIntensity
+                    if(base){
+                        mat.color.copy(base.color)
+                        if(mat.emissive && base.emissive){
+                            mat.emissive.copy(base.emissive)
+                            if(base.emissiveIntensity !== null){
+                                mat.emissiveIntensity = base.emissiveIntensity
+                            }
                         }
                     }
-                    mat.vertexColors = base.vertexColors
-                    mat.wireframe = base.wireframe
                     mat.needsUpdate = true
                 }
             })
+        }
+
+        function applyViewMode(mode){
+            viewMode = (mode === "solid" || mode === "wireframe") ? mode : "textured"
+            scene.traverse(obj=>{
+                if(!obj.isMesh) return
+                if(obj.userData && obj.userData.ignoreViewMode) return
+                const mats = Array.isArray(obj.material) ? obj.material : [obj.material]
+                mats.forEach(mat=>{
+                    if(!mat) return
+                    let defaults = viewModeDefaults.get(mat)
+                    if(!defaults){
+                        defaults = {
+                            map: mat.map || null,
+                            wireframe: mat.wireframe === true,
+                            vertexColors: mat.vertexColors
+                        }
+                        viewModeDefaults.set(mat, defaults)
+                    }
+                    if(viewMode === "solid"){
+                        mat.map = null
+                        mat.wireframe = false
+                        mat.vertexColors = true
+                        if(mat.color){
+                            mat.color.setHex(0xffffff)
+                        }
+                    }else if(viewMode === "wireframe"){
+                        mat.map = null
+                        mat.wireframe = true
+                        mat.vertexColors = true
+                        if(mat.color){
+                            mat.color.setHex(0xffffff)
+                        }
+                    }else{
+                        mat.map = defaults.map
+                        mat.wireframe = defaults.wireframe
+                        mat.vertexColors = defaults.vertexColors
+                    }
+                    mat.needsUpdate = true
+                })
+            })
+            originalMaterialColors = new WeakMap()
+        }
+
+        function loadGridTexture(){
+            const texture = loader.load(resolveTexture("grid"), ()=>{
+                if(gridMesh && gridMesh.material){
+                    gridMesh.material.needsUpdate = true
+                }
+            })
+            texture.magFilter = THREE.NearestFilter
+            texture.minFilter = THREE.NearestFilter
+            texture.wrapS = THREE.ClampToEdgeWrapping
+            texture.wrapT = THREE.ClampToEdgeWrapping
+            return texture
+        }
+
+        function updateGridTransform(){
+            if(!gridMesh) return
+            gridMesh.rotation.x = -Math.PI / 2
+            gridMesh.position.set(
+                8 - currentModelCenter.x,
+                -0.01 - currentModelCenter.y,
+                8 - currentModelCenter.z
+            )
+        }
+
+        function ensureGridMesh(){
+            if(gridMesh){
+                return gridMesh
+            }
+            const geometry = new THREE.PlaneGeometry(48, 48)
+            const material = new THREE.MeshBasicMaterial({
+                map: loadGridTexture(),
+                color: 0xffffff,
+                side: THREE.DoubleSide,
+                transparent: true,
+                alphaTest: 0.1
+            })
+            gridMesh = new THREE.Mesh(geometry, material)
+            gridMesh.userData.ignoreViewMode = true
+            gridMesh.renderOrder = -1
+            updateGridTransform()
+            scene.add(gridMesh)
+            return gridMesh
+        }
+
+        function applyGridEnabled(enabled){
+            gridEnabled = !!enabled
+            if(gridEnabled){
+                ensureGridMesh()
+                gridMesh.visible = true
+            }else if(gridMesh){
+                gridMesh.visible = false
+            }
         }
 
         function updateHover(){
@@ -838,11 +1130,22 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                         }else{
                             tex = getTextureForRef(faceDef.texture)
                         }
-                        materials.push(new THREE.MeshBasicMaterial({ map: tex, color: 0xffffff, vertexColors: true }))
+                        materials.push(new THREE.MeshBasicMaterial({
+                            map: tex,
+                            color: 0xffffff,
+                            vertexColors: true,
+                            transparent: true,
+                            alphaTest: 0.1
+                        }))
                         applyFaceUV(geometry, i, faceDef.uv, tex?.image?.width||16, tex?.image?.height||16, faceDef.rotation, face)
                         applyFaceAOColors(geometry, i, face, shade, el, sx, sy, sz, occupancy)
                     }else{
-                        materials.push(new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: true }))
+                        materials.push(new THREE.MeshBasicMaterial({
+                            color: 0xffffff,
+                            vertexColors: true,
+                            transparent: true,
+                            alphaTest: 0.1
+                        }))
                         applyFaceAOColors(geometry, i, face, shade, el, sx, sy, sz, occupancy)
                     }
                 })
@@ -874,6 +1177,10 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 scene.add(mesh)
                 pickableMeshes.push(mesh)
             })
+            applyViewMode(viewMode)
+            if(gridEnabled){
+                updateGridTransform()
+            }
             console.log("Pickable meshes:", pickableMeshes.length)
 
             if(resetCamera){
@@ -891,6 +1198,22 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             }catch(e){
                 console.warn("Model JSON parse failed:", e)
             }
+        }
+
+        window.setViewMode = function(mode){
+            applyViewMode(mode)
+        }
+
+        window.setOrthographic = function(enabled){
+            applyOrthographic(enabled)
+        }
+
+        window.setGridEnabled = function(enabled){
+            applyGridEnabled(enabled)
+        }
+
+        window.resetCamera = function(){
+            resetCameraState()
         }
 
         window.addEventListener('DOMContentLoaded', ()=>{
@@ -988,16 +1311,24 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         canvas.addEventListener("wheel", (e)=>{
             e.preventDefault()
             const ZOOM_SPEED = 0.002
-            orbitRadius = Math.max(2, orbitRadius * (1 + e.deltaY * ZOOM_SPEED))
-            updateCameraFromOrbit()
+            if(useOrthographic){
+                const nextZoom = orthoCamera.zoom * (1 - e.deltaY * ZOOM_SPEED)
+                orthoCamera.zoom = Math.max(0.2, Math.min(8, nextZoom))
+                orthoCamera.updateProjectionMatrix()
+            }else{
+                orbitRadius = Math.max(2, orbitRadius * (1 + e.deltaY * ZOOM_SPEED))
+                updateCameraFromOrbit()
+            }
         }, { passive: false })
 
         canvas.addEventListener("contextmenu", (e)=>e.preventDefault())
 
         window.addEventListener('resize', ()=>{
             renderer.setSize(Math.floor(window.innerWidth), Math.floor(window.innerHeight))
-            camera.aspect = window.innerWidth / window.innerHeight
-            camera.updateProjectionMatrix()
+            const aspect = window.innerWidth / window.innerHeight
+            perspectiveCamera.aspect = aspect
+            perspectiveCamera.updateProjectionMatrix()
+            updateOrthoFrustum()
         })
         </script>
         </body>

@@ -38,6 +38,12 @@ class ModelViewerService(private val project: Project) {
     private var browser: JBCefBrowser? = null
     private var pendingJson: String? = null
     private var pageReady = false
+    private var pendingViewMode: String? = null
+    private var pendingOrthographic: Boolean? = null
+    private var pendingGridEnabled: Boolean? = null
+    private var viewMode: String = "textured"
+    private var orthographic: Boolean = false
+    private var gridEnabled: Boolean = false
     private var activeModelFile: com.intellij.openapi.vfs.VirtualFile? = null
     private var activeModelEditor: Editor? = null
     private var hoverQuery: JBCefJSQuery? = null
@@ -73,6 +79,18 @@ class ModelViewerService(private val project: Project) {
                         pendingJson?.let {
                             loadModel(it)
                             pendingJson = null
+                        }
+                        pendingViewMode?.let { mode ->
+                            setViewMode(mode)
+                            pendingViewMode = null
+                        }
+                        pendingOrthographic?.let { enabled ->
+                            setOrthographic(enabled)
+                            pendingOrthographic = null
+                        }
+                        pendingGridEnabled?.let { enabled ->
+                            setGridEnabled(enabled)
+                            pendingGridEnabled = null
                         }
                     }
                 }
@@ -118,6 +136,65 @@ class ModelViewerService(private val project: Project) {
         browser!!.cefBrowser.executeJavaScript(
             jsCode,
             browser!!.cefBrowser.url,
+            0
+        )
+    }
+
+    fun getViewMode(): String {
+        return viewMode
+    }
+
+    fun isOrthographic(): Boolean {
+        return orthographic
+    }
+
+    fun isGridEnabled(): Boolean {
+        return gridEnabled
+    }
+
+    fun setViewMode(mode: String) {
+        val normalized = when {
+            mode.equals("solid", true) -> "solid"
+            mode.equals("wireframe", true) -> "wireframe"
+            else -> "textured"
+        }
+        viewMode = normalized
+        if (browser == null || !pageReady) {
+            pendingViewMode = normalized
+            return
+        }
+        runViewerScript("window.setViewMode && window.setViewMode('$normalized');")
+    }
+
+    fun setOrthographic(enabled: Boolean) {
+        orthographic = enabled
+        if (browser == null || !pageReady) {
+            pendingOrthographic = enabled
+            return
+        }
+        runViewerScript("window.setOrthographic && window.setOrthographic(${enabled});")
+    }
+
+    fun setGridEnabled(enabled: Boolean) {
+        gridEnabled = enabled
+        if (browser == null || !pageReady) {
+            pendingGridEnabled = enabled
+            return
+        }
+        runViewerScript("window.setGridEnabled && window.setGridEnabled(${enabled});")
+    }
+
+    fun resetCamera() {
+        if (browser == null || !pageReady) {
+            return
+        }
+        runViewerScript("window.resetCamera && window.resetCamera();")
+    }
+
+    private fun runViewerScript(jsCode: String) {
+        browser?.cefBrowser?.executeJavaScript(
+            jsCode,
+            browser?.cefBrowser?.url ?: "http://localhost/",
             0
         )
     }

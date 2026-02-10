@@ -15,24 +15,31 @@ object AssetServer {
         server!!.createContext("/assets") { exchange ->
             val path = exchange.requestURI.path.removePrefix("/assets/")
             val file = File(base, path)
+            val extension = file.extension.lowercase()
+            val mime = when (extension) {
+                "png" -> "image/png"
+                "jpg", "jpeg" -> "image/jpeg"
+                "json" -> "application/json"
+                "txt" -> "text/plain"
+                else -> "application/octet-stream"
+            }
+
+            exchange.responseHeaders.add("Access-Control-Allow-Origin", "*")
+            exchange.responseHeaders.add("Content-Type", mime)
 
             if (file.exists() && file.isFile) {
-                val mime = when (file.extension.lowercase()) {
-                    "png" -> "image/png"
-                    "jpg", "jpeg" -> "image/jpeg"
-                    "json" -> "application/json"
-                    "txt" -> "text/plain"
-                    else -> "application/octet-stream"
-                }
-
-                exchange.responseHeaders.add("Access-Control-Allow-Origin", "*")
-                exchange.responseHeaders.add("Content-Type", mime)
-
                 val bytes = Files.readAllBytes(file.toPath())
                 exchange.sendResponseHeaders(200, bytes.size.toLong())
                 exchange.responseBody.use { it.write(bytes) }
             } else {
-                exchange.sendResponseHeaders(404, -1)
+                val resource = AssetServer::class.java.getResourceAsStream("/assets/$path")
+                if (resource != null) {
+                    val bytes = resource.readBytes()
+                    exchange.sendResponseHeaders(200, bytes.size.toLong())
+                    exchange.responseBody.use { it.write(bytes) }
+                } else {
+                    exchange.sendResponseHeaders(404, -1)
+                }
             }
             exchange.close()
         }
