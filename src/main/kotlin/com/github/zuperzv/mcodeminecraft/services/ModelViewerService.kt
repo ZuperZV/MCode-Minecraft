@@ -16,6 +16,8 @@ import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.TextEditor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.Disposable
+import com.intellij.openapi.util.Disposer
 import com.intellij.ui.JBColor
 import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.ui.jcef.JBCefJSQuery
@@ -28,6 +30,7 @@ import java.awt.Color
 import java.awt.Font
 import java.math.BigDecimal
 import java.io.File
+import java.util.concurrent.CopyOnWriteArrayList
 
 @Service(Service.Level.PROJECT)
 class ModelViewerService(private val project: Project) {
@@ -70,6 +73,7 @@ class ModelViewerService(private val project: Project) {
     private var selectedHighlighter: RangeHighlighter? = null
     private var selectedEditor: Editor? = null
     private var selectedIndex: Int? = null
+    private val selectionListeners = CopyOnWriteArrayList<(Int?) -> Unit>()
     private val scrollAlarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, project)
     @Volatile
     private var suppressAutoPreview = false
@@ -200,6 +204,32 @@ class ModelViewerService(private val project: Project) {
         activeModelEditor = editor
     }
 
+    fun getActiveModelFile(): com.intellij.openapi.vfs.VirtualFile? {
+        return activeModelFile
+    }
+
+    fun getActiveModelEditor(): Editor? {
+        return activeModelEditor
+    }
+
+    fun getActiveModelText(): String? {
+        val editor = activeModelEditor
+        if (editor != null && !editor.isDisposed) {
+            return editor.document.text
+        }
+        val file = activeModelFile ?: return null
+        return runCatching { String(file.contentsToByteArray()) }.getOrNull()
+    }
+
+    fun getSelectedIndex(): Int? {
+        return selectedIndex
+    }
+
+    fun addSelectionListener(parentDisposable: Disposable, listener: (Int?) -> Unit) {
+        selectionListeners.add(listener)
+        Disposer.register(parentDisposable) { selectionListeners.remove(listener) }
+    }
+
     fun loadModel(json: String, resetCamera: Boolean = true) {
         println("loadModel called")
 
@@ -319,6 +349,21 @@ class ModelViewerService(private val project: Project) {
             return
         }
         runViewerScript("window.resetCamera && window.resetCamera();")
+    }
+
+    fun setSelectedElement(index: Int?) {
+        if (browser == null || !pageReady) {
+            return
+        }
+        val value = index ?: -1
+        runViewerScript("window.setSelectedElement && window.setSelectedElement(${value});")
+    }
+
+    fun setElementHidden(index: Int, hidden: Boolean) {
+        if (browser == null || !pageReady) {
+            return
+        }
+        runViewerScript("window.setElementHidden && window.setElementHidden(${index}, ${hidden});")
     }
 
     private fun runViewerScript(jsCode: String) {
@@ -592,16 +637,26 @@ class ModelViewerService(private val project: Project) {
         if (trimmed.isEmpty() || trimmed == "null" || trimmed == "undefined") {
             selectedIndex = null
             clearSelectedHighlight()
+            notifySelectionListeners()
             return
         }
         val index = trimmed.toIntOrNull()
         if (index == null || index < 0) {
             selectedIndex = null
             clearSelectedHighlight()
+            notifySelectionListeners()
             return
         }
         selectedIndex = index
         applySelectedHighlight()
+        notifySelectionListeners()
+    }
+
+    private fun notifySelectionListeners() {
+        val value = selectedIndex
+        selectionListeners.forEach { listener ->
+            listener(value)
+        }
     }
 
     private fun readVector(root: com.google.gson.JsonObject, name: String): DoubleArray? {

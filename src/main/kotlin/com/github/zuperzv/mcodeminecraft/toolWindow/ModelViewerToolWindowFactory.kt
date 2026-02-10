@@ -3,33 +3,52 @@ package com.github.zuperzv.mcodeminecraft.toolWindow
 import com.github.zuperzv.mcodeminecraft.preview.ModelAutoPreviewService
 import com.github.zuperzv.mcodeminecraft.services.AssetServer
 import com.github.zuperzv.mcodeminecraft.services.ModelViewerService
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.actionSystem.ToggleAction
 import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.editor.EditorFactory
+import com.intellij.openapi.editor.event.DocumentEvent as EditorDocumentEvent
+import com.intellij.openapi.editor.event.DocumentListener as EditorDocumentListener
+import com.intellij.openapi.fileEditor.FileEditorManagerListener
+import com.intellij.openapi.fileEditor.FileEditorManagerEvent
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.ComboBox
+import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
 import com.intellij.ui.JBColor
+import com.intellij.ui.SearchTextField
 import com.intellij.ui.components.*
 import com.intellij.ui.content.ContentFactory
 import com.intellij.ui.jcef.JBCefApp
 import com.intellij.ui.jcef.JBCefBrowser
+import com.intellij.ui.treeStructure.Tree
 import com.intellij.util.ui.JBUI
 import org.intellij.lang.annotations.Language
 import java.awt.*
 import java.awt.event.FocusAdapter
 import java.awt.event.FocusEvent
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
 import java.awt.geom.RoundRectangle2D
 import java.io.File
 import javax.swing.*
+import javax.swing.event.DocumentEvent
+import javax.swing.event.DocumentListener
 import javax.swing.plaf.basic.BasicSplitPaneDivider
 import javax.swing.plaf.basic.BasicSplitPaneUI
+import javax.swing.tree.DefaultMutableTreeNode
+import javax.swing.tree.DefaultTreeModel
+import javax.swing.tree.TreeCellRenderer
+import javax.swing.tree.TreePath
+import javax.swing.tree.TreeSelectionModel
 
 class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
 
@@ -49,6 +68,30 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         JBColor.namedColor(
             "Borders.color",
             JBColor(0x26282b, 0x26282b)
+        )
+
+    val TAB_TEXT_COLOR: Color =
+        JBColor.namedColor(
+            "TabbedPane.foreground",
+            JBColor(0xd6d6d6, 0xd6d6d6)
+        )
+
+    val TAB_TEXT_SELECTED_COLOR: Color =
+        JBColor.namedColor(
+            "TabbedPane.selectedForeground",
+            JBColor(0xffffff, 0xffffff)
+        )
+
+    val TAB_BG_COLOR: Color =
+        JBColor.namedColor(
+            "TabbedPane.unselectedBackground",
+            JBColor(0x2f3136, 0x2f3136)
+        )
+
+    val TAB_BG_SELECTED_COLOR: Color =
+        JBColor.namedColor(
+            "TabbedPane.selectedBackground",
+            JBColor(0x3b3f46, 0x3b3f46)
         )
 
     val TEST_COLOR: Color =
@@ -204,37 +247,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             null
         }
 
-        val controlsPanel = JPanel()
-        controlsPanel.layout = BoxLayout(controlsPanel, BoxLayout.Y_AXIS)
-        controlsPanel.add(JBLabel("Model controls"))
-        controlsPanel.add(Box.createVerticalStrut(6))
-
-        val pathRow = JPanel(FlowLayout(FlowLayout.LEFT, 0, 0))
-        pathRow.add(JBLabel("Model path: "))
-        pathRow.add(JBTextField().apply { columns = 22 })
-        controlsPanel.add(pathRow)
-        controlsPanel.add(Box.createVerticalStrut(6))
-
-        val actionsRow = JPanel(FlowLayout(FlowLayout.LEFT, 0, 0))
-        actionsRow.add(JButton("Load"))
-        controlsPanel.add(actionsRow)
-        controlsPanel.add(Box.createVerticalStrut(6))
-
-        controlsPanel.add(JBCheckBox("Auto preview", true))
-        controlsPanel.add(Box.createVerticalStrut(8))
-        controlsPanel.add(JBLabel("Recent models"))
-        val recentModels = JBList(
-            listOf(
-                "minecraft:block/stone",
-                "minecraft:block/oak_log",
-                "minecraft:item/diamond_sword"
-            )
-        )
-        controlsPanel.add(
-            JBScrollPane(recentModels).apply {
-                preferredSize = Dimension(200, 140)
-            }
-        )
+        val controlsPanel = createControlsPanel(project, viewerService)
 
         val viewModeGroupAction = DefaultActionGroup("View Mode", true).apply {
             templatePresentation.icon = AllIcons.Actions.ChangeView
@@ -499,6 +512,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 }
             }
             pickableMeshes.length = 0
+            elementRoots.length = 0
             if(hoverState.object){
                 setMeshHighlight(hoverState.object, false)
                 hoverState.object = null
@@ -589,6 +603,8 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         const pointer = new THREE.Vector2()
         let hasPointer = false
         const pickableMeshes = []
+        const elementRoots = []
+        const hiddenElements = new Set()
         let originalMaterialColors = new WeakMap()
         const viewModeDefaults = new WeakMap()
         const hoverState = { object: null }
@@ -1648,6 +1664,8 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 mesh.userData.baseSize = { x: sx, y: sy, z: sz }
                 mesh.userData.root = elementRoot
                 mesh.userData.pivot = pivot
+                elementRoots[elementIndex] = elementRoot
+                elementRoot.visible = !hiddenElements.has(elementIndex)
                 scene.add(elementRoot)
                 pickableMeshes.push(mesh)
             })
@@ -1712,6 +1730,36 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 snapStep = value
                 updateTransformSnaps()
             }
+        }
+
+        window.setSelectedElement = function(index){
+            if(!Number.isInteger(index) || index < 0){
+                clearSelection()
+                return
+            }
+            const target = pickableMeshes.find(mesh=>mesh?.userData?.elementIndex === index)
+            if(!target){
+                clearSelection()
+                return
+            }
+            clearSelection()
+            addSelection(target)
+        }
+
+        window.setElementHidden = function(index, hidden){
+            if(!Number.isInteger(index)) return
+            const root = elementRoots[index]
+            if(!root) return
+            const isHidden = !!hidden
+            if(isHidden){
+                hiddenElements.add(index)
+                if(selectedState.active?.userData?.elementIndex === index){
+                    clearSelection()
+                }
+            }else{
+                hiddenElements.delete(index)
+            }
+            root.visible = !isHidden
         }
 
         window.resetCamera = function(){
@@ -1896,6 +1944,891 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         </body>
         </html>
     """.trimIndent()
+
+    private data class TextureEntry(val key: String, val value: String)
+
+    private enum class ElementNodeKind { ROOT, GROUP, ELEMENT }
+
+    private data class ElementTreeItem(
+        val kind: ElementNodeKind,
+        val name: String,
+        val index: Int? = null
+    )
+
+    private data class HeaderAction(val icon: Icon, val tooltip: String, val handler: (JButton) -> Unit)
+
+    private data class TexturesPanelState(
+        val panel: JComponent,
+        val model: DefaultListModel<TextureEntry>,
+        val searchField: SearchTextField,
+        val allEntries: MutableList<TextureEntry>
+    )
+
+    private class ElementsPanelState(
+        val panel: JComponent,
+        val tree: Tree,
+        val model: DefaultTreeModel,
+        val countLabel: JBLabel,
+        val elementNodes: MutableMap<Int, DefaultMutableTreeNode>,
+        val hiddenElements: MutableSet<Int>
+    ) {
+        var suppressSelectionSync = false
+        var totalElements = 0
+        var lastModelPath: String? = null
+    }
+
+    private val TAB_LABEL_KEY = "tabLabel"
+
+    private fun createControlsPanel(project: Project, viewerService: ModelViewerService): JComponent {
+        val tabbedPane = createDraggableTabbedPane().apply {
+            preferredSize = JBUI.size(360, 420)
+        }
+
+        lateinit var texturesState: TexturesPanelState
+        lateinit var elementsState: ElementsPanelState
+        val refresh = {
+            refreshFromActiveJson(viewerService, texturesState, elementsState)
+        }
+
+        texturesState = createTexturesPanel(refresh)
+        elementsState = createElementsPanel(project, viewerService, refresh)
+
+        addClosableTab(
+            tabbedPane,
+            "Textures",
+            AllIcons.FileTypes.Image,
+            texturesState.panel
+        )
+        addClosableTab(
+            tabbedPane,
+            "Elements",
+            AllIcons.Nodes.Folder,
+            elementsState.panel
+        )
+        registerTabStyleUpdater(tabbedPane)
+
+        refresh()
+
+        EditorFactory.getInstance().eventMulticaster.addDocumentListener(
+            object : EditorDocumentListener {
+                override fun documentChanged(event: EditorDocumentEvent) {
+                    val activeEditor = viewerService.getActiveModelEditor() ?: return
+                    if (activeEditor.isDisposed || event.document != activeEditor.document) {
+                        return
+                    }
+                    refresh()
+                }
+            },
+            project
+        )
+
+        project.messageBus.connect().subscribe(
+            FileEditorManagerListener.FILE_EDITOR_MANAGER,
+            object : FileEditorManagerListener {
+                override fun selectionChanged(event: FileEditorManagerEvent) {
+                    SwingUtilities.invokeLater { refresh() }
+                }
+            }
+        )
+
+        viewerService.addSelectionListener(project) { index ->
+            SwingUtilities.invokeLater {
+                updateSelectionFromViewer(index, elementsState)
+            }
+        }
+
+        return JPanel(BorderLayout()).apply {
+            isOpaque = true
+            background = BACKGROUND_COLOR
+            border = JBUI.Borders.empty(8)
+            add(tabbedPane, BorderLayout.CENTER)
+        }
+    }
+
+    private fun createTexturesPanel(onRefresh: () -> Unit): TexturesPanelState {
+        val model = DefaultListModel<TextureEntry>()
+        val allEntries = mutableListOf<TextureEntry>()
+
+        val searchField = SearchTextField().apply {
+            isVisible = false
+            textEditor.emptyText.text = "Filter textures"
+            textEditor.background = BACKGROUND_COLOR
+        }
+
+        fun refreshFilter() {
+            updateTextureModel(model, allEntries, searchField.text)
+        }
+
+        attachSearchFilter(searchField) { refreshFilter() }
+
+        val header = createCategoryHeader(
+            "TEXTURES",
+            listOf(
+                HeaderAction(AllIcons.Actions.Refresh, "Reload from JSON") { _ ->
+                    onRefresh()
+                }
+            ),
+            listOf(
+                HeaderAction(AllIcons.Actions.Search, "Search") { _ ->
+                    toggleSearchField(searchField)
+                    refreshFilter()
+                }
+            )
+        )
+
+        val list = JBList(model).apply {
+            selectionMode = ListSelectionModel.SINGLE_SELECTION
+            background = BACKGROUND_COLOR
+            cellRenderer = TextureListRenderer()
+        }
+
+        val headerContainer = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            add(header, BorderLayout.NORTH)
+            add(searchField, BorderLayout.SOUTH)
+        }
+
+        val panel = JPanel(BorderLayout()).apply {
+            isOpaque = true
+            background = BACKGROUND_COLOR
+            border = JBUI.Borders.empty(6, 6, 6, 6)
+            add(headerContainer, BorderLayout.NORTH)
+            add(JBScrollPane(list).apply { border = JBUI.Borders.emptyTop(6) }, BorderLayout.CENTER)
+        }
+
+        return TexturesPanelState(panel, model, searchField, allEntries)
+    }
+
+    private fun createElementsPanel(
+        project: Project,
+        viewerService: ModelViewerService,
+        onRefresh: () -> Unit
+    ): ElementsPanelState {
+        val rootNode = DefaultMutableTreeNode(ElementTreeItem(ElementNodeKind.ROOT, "root"))
+        val model = DefaultTreeModel(rootNode)
+        val tree = Tree(model).apply {
+            isRootVisible = false
+            showsRootHandles = true
+            background = BACKGROUND_COLOR
+            selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
+        }
+        val elementNodes = mutableMapOf<Int, DefaultMutableTreeNode>()
+        val hiddenElements = mutableSetOf<Int>()
+
+        val countLabel = JBLabel().apply {
+            foreground = JBColor.GRAY
+            border = JBUI.Borders.emptyRight(6)
+        }
+
+        val panel = JPanel(BorderLayout()).apply {
+            isOpaque = true
+            background = BACKGROUND_COLOR
+            border = JBUI.Borders.empty(6, 6, 6, 6)
+        }
+        val state = ElementsPanelState(
+            panel = panel,
+            tree = tree,
+            model = model,
+            countLabel = countLabel,
+            elementNodes = elementNodes,
+            hiddenElements = hiddenElements
+        )
+
+        tree.cellRenderer = ElementsTreeRenderer(state)
+        tree.addTreeSelectionListener {
+            if (state.suppressSelectionSync) {
+                return@addTreeSelectionListener
+            }
+            val node = tree.lastSelectedPathComponent as? DefaultMutableTreeNode
+            val item = node?.userObject as? ElementTreeItem
+            if (item?.kind == ElementNodeKind.ELEMENT) {
+                viewerService.setSelectedElement(item.index)
+                updateElementCountLabel(state, selectedCount = 1)
+            } else {
+                viewerService.setSelectedElement(null)
+                updateElementCountLabel(state, selectedCount = 0)
+            }
+        }
+        tree.addMouseListener(object : MouseAdapter() {
+            override fun mousePressed(e: MouseEvent) {
+                val row = tree.getRowForLocation(e.x, e.y)
+                if (row < 0) return
+                val path = tree.getPathForRow(row) ?: return
+                val node = path.lastPathComponent as? DefaultMutableTreeNode ?: return
+                val item = node.userObject as? ElementTreeItem ?: return
+                if (item.kind != ElementNodeKind.ELEMENT || item.index == null) return
+                val iconSize = JBUI.scale(16)
+                val padding = JBUI.scale(10)
+                val iconX = tree.width - iconSize - padding
+                if (e.x >= iconX) {
+                    val hidden = state.hiddenElements.contains(item.index)
+                    if (hidden) {
+                        state.hiddenElements.remove(item.index)
+                    } else {
+                        state.hiddenElements.add(item.index)
+                    }
+                    viewerService.setElementHidden(item.index, !hidden)
+                    tree.getRowBounds(row)?.let { tree.repaint(it) }
+                    e.consume()
+                }
+            }
+        })
+
+        val header = createCategoryHeader(
+            "ELEMENTS",
+            listOf(
+                HeaderAction(AllIcons.General.Add, "Add group") { _ ->
+                    addEmptyGroup(project, viewerService) {
+                        onRefresh()
+                    }
+                },
+                HeaderAction(AllIcons.Actions.Refresh, "Reload from JSON") { _ ->
+                    onRefresh()
+                }
+            ),
+            emptyList(),
+            countLabel
+        )
+
+        panel.add(header, BorderLayout.NORTH)
+        panel.add(JBScrollPane(tree).apply { border = JBUI.Borders.emptyTop(6) }, BorderLayout.CENTER)
+
+        return state
+    }
+
+    private fun createCategoryHeader(
+        title: String,
+        leftActions: List<HeaderAction>,
+        rightActions: List<HeaderAction>,
+        rightPrefix: JComponent? = null
+    ): JComponent {
+        val left = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0)).apply {
+            isOpaque = false
+            add(JBLabel(title).apply {
+                foreground = JBColor.namedColor("Label.foreground", JBColor(0xd6d6d6, 0xd6d6d6))
+                font = font.deriveFont(Font.BOLD, JBUI.scale(12).toFloat())
+            })
+            leftActions.forEach { action ->
+                add(createHeaderIconButton(action))
+            }
+        }
+        val right = JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(6), 0)).apply {
+            isOpaque = false
+            if (rightPrefix != null) {
+                add(rightPrefix)
+            }
+            rightActions.forEach { action ->
+                add(createHeaderIconButton(action))
+            }
+        }
+        return JPanel(BorderLayout()).apply {
+            isOpaque = false
+            border = JBUI.Borders.empty(4, 2)
+            add(left, BorderLayout.WEST)
+            add(right, BorderLayout.EAST)
+        }
+    }
+
+    private fun createHeaderIconButton(action: HeaderAction): JButton {
+        return JButton(action.icon).apply {
+            toolTipText = action.tooltip
+            isOpaque = false
+            border = JBUI.Borders.empty()
+            isContentAreaFilled = false
+            isFocusable = false
+            preferredSize = JBUI.size(20, 20)
+            addActionListener { action.handler(this) }
+        }
+    }
+
+    private fun attachSearchFilter(searchField: SearchTextField, onChange: (String) -> Unit) {
+        searchField.textEditor.document.addDocumentListener(object : DocumentListener {
+            override fun insertUpdate(e: DocumentEvent) {
+                onChange(searchField.text)
+            }
+
+            override fun removeUpdate(e: DocumentEvent) {
+                onChange(searchField.text)
+            }
+
+            override fun changedUpdate(e: DocumentEvent) {
+                onChange(searchField.text)
+            }
+        })
+    }
+
+    private fun toggleSearchField(searchField: SearchTextField) {
+        searchField.isVisible = !searchField.isVisible
+        if (searchField.isVisible) {
+            searchField.requestFocusInWindow()
+        } else {
+            searchField.text = ""
+        }
+        searchField.parent?.revalidate()
+        searchField.parent?.repaint()
+    }
+
+    private fun refreshFromActiveJson(
+        viewerService: ModelViewerService,
+        texturesState: TexturesPanelState,
+        elementsState: ElementsPanelState
+    ) {
+        val jsonText = viewerService.getActiveModelText()
+        if (jsonText.isNullOrBlank()) {
+            clearTextures(texturesState)
+            clearElements(elementsState)
+            return
+        }
+        val root = parseRootObject(jsonText) ?: return
+        updateTexturesFromJson(root, texturesState)
+        updateElementsFromJson(root, elementsState, viewerService)
+    }
+
+    private fun parseRootObject(jsonText: String?): JsonObject? {
+        if (jsonText.isNullOrBlank()) return null
+        val element = runCatching { JsonParser.parseString(jsonText) }.getOrNull() ?: return null
+        return element.takeIf { it.isJsonObject }?.asJsonObject
+    }
+
+    private fun clearTextures(state: TexturesPanelState) {
+        state.allEntries.clear()
+        state.model.clear()
+    }
+
+    private fun clearElements(state: ElementsPanelState) {
+        state.elementNodes.clear()
+        state.hiddenElements.clear()
+        state.totalElements = 0
+        state.model.setRoot(DefaultMutableTreeNode(ElementTreeItem(ElementNodeKind.ROOT, "root")))
+        state.model.reload()
+        updateElementCountLabel(state, selectedCount = 0)
+    }
+
+    private fun updateTexturesFromJson(root: JsonObject, state: TexturesPanelState) {
+        state.allEntries.clear()
+        val textures = root.getAsJsonObject("textures")
+        textures?.entrySet()?.forEach { entry ->
+            val value = if (entry.value.isJsonPrimitive) {
+                entry.value.asString
+            } else {
+                entry.value.toString()
+            }
+            state.allEntries.add(TextureEntry(entry.key, value))
+        }
+        updateTextureModel(state.model, state.allEntries, state.searchField.text)
+    }
+
+    private fun updateTextureModel(
+        model: DefaultListModel<TextureEntry>,
+        entries: List<TextureEntry>,
+        filter: String
+    ) {
+        model.clear()
+        val trimmed = filter.trim()
+        val filtered = if (trimmed.isEmpty()) {
+            entries
+        } else {
+            entries.filter {
+                it.key.contains(trimmed, ignoreCase = true) ||
+                    it.value.contains(trimmed, ignoreCase = true)
+            }
+        }
+        filtered.forEach { model.addElement(it) }
+    }
+
+    private fun updateElementsFromJson(
+        root: JsonObject,
+        state: ElementsPanelState,
+        viewerService: ModelViewerService
+    ) {
+        val filePath = viewerService.getActiveModelFile()?.path
+        if (filePath != state.lastModelPath) {
+            state.hiddenElements.clear()
+            state.lastModelPath = filePath
+        }
+        val elementNames = mutableMapOf<Int, String>()
+        val elements = root.getAsJsonArray("elements")
+        val totalElements = elements?.size() ?: 0
+        state.totalElements = totalElements
+        elements?.forEachIndexed { index, json ->
+            val name = if (json.isJsonObject) {
+                json.asJsonObject.get("name")?.asString ?: ""
+            } else {
+                ""
+            }
+            elementNames[index] = name
+        }
+        state.hiddenElements.removeAll { it < 0 || it >= totalElements }
+
+        state.elementNodes.clear()
+        val rootNode = DefaultMutableTreeNode(ElementTreeItem(ElementNodeKind.ROOT, "root"))
+        val used = mutableSetOf<Int>()
+        val groups = root.getAsJsonArray("groups")
+
+        if (groups != null) {
+            groups.forEach { entry ->
+                when {
+                    entry.isJsonObject -> {
+                        val groupNode = parseGroupNode(entry.asJsonObject, elementNames, used, state)
+                        rootNode.add(groupNode)
+                    }
+                    entry.isJsonPrimitive && entry.asJsonPrimitive.isNumber -> {
+                        val index = entry.asInt
+                        val node = createElementNode(index, elementNames, used, state)
+                        if (node != null) {
+                            rootNode.add(node)
+                        }
+                    }
+                }
+            }
+            for (index in 0 until totalElements) {
+                if (!used.contains(index)) {
+                    val node = createElementNode(index, elementNames, used, state)
+                    if (node != null) {
+                        rootNode.add(node)
+                    }
+                }
+            }
+        } else {
+            for (index in 0 until totalElements) {
+                val node = createElementNode(index, elementNames, used, state)
+                if (node != null) {
+                    rootNode.add(node)
+                }
+            }
+        }
+
+        state.model.setRoot(rootNode)
+        state.model.reload()
+        expandAll(state.tree)
+        updateSelectionFromViewer(viewerService.getSelectedIndex(), state)
+
+        for (index in 0 until totalElements) {
+            viewerService.setElementHidden(index, state.hiddenElements.contains(index))
+        }
+    }
+
+    private fun parseGroupNode(
+        obj: JsonObject,
+        elementNames: Map<Int, String>,
+        used: MutableSet<Int>,
+        state: ElementsPanelState
+    ): DefaultMutableTreeNode {
+        val name = obj.get("name")?.asString ?: ""
+        val groupNode = DefaultMutableTreeNode(ElementTreeItem(ElementNodeKind.GROUP, name))
+        val children = obj.getAsJsonArray("children")
+        children?.forEach { child ->
+            when {
+                child.isJsonObject -> {
+                    groupNode.add(parseGroupNode(child.asJsonObject, elementNames, used, state))
+                }
+                child.isJsonPrimitive && child.asJsonPrimitive.isNumber -> {
+                    val index = child.asInt
+                    val node = createElementNode(index, elementNames, used, state)
+                    if (node != null) {
+                        groupNode.add(node)
+                    }
+                }
+            }
+        }
+        return groupNode
+    }
+
+    private fun createElementNode(
+        index: Int,
+        elementNames: Map<Int, String>,
+        used: MutableSet<Int>,
+        state: ElementsPanelState
+    ): DefaultMutableTreeNode? {
+        if (index < 0 || !elementNames.containsKey(index)) return null
+        val name = elementNames[index] ?: ""
+        val item = ElementTreeItem(ElementNodeKind.ELEMENT, name, index)
+        val node = DefaultMutableTreeNode(item)
+        state.elementNodes[index] = node
+        used.add(index)
+        return node
+    }
+
+    private fun expandAll(tree: Tree) {
+        var row = 0
+        while (row < tree.rowCount) {
+            tree.expandRow(row)
+            row++
+        }
+    }
+
+    private fun updateSelectionFromViewer(index: Int?, state: ElementsPanelState) {
+        state.suppressSelectionSync = true
+        try {
+            val path = index?.let { state.elementNodes[it] }?.let { TreePath(it.path) }
+            state.tree.selectionPath = path
+            if (path != null) {
+                state.tree.scrollPathToVisible(path)
+                updateElementCountLabel(state, selectedCount = 1)
+            } else {
+                updateElementCountLabel(state, selectedCount = 0)
+            }
+        } finally {
+            state.suppressSelectionSync = false
+        }
+    }
+
+    private fun updateElementCountLabel(state: ElementsPanelState, selectedCount: Int) {
+        val total = state.totalElements
+        state.countLabel.text = "${selectedCount} / ${total}"
+    }
+
+    private fun addEmptyGroup(
+        project: Project,
+        viewerService: ModelViewerService,
+        onUpdated: () -> Unit
+    ) {
+        val activeFile = viewerService.getActiveModelFile()
+        if (activeFile?.extension != "json") {
+            Messages.showInfoMessage(project, "No active JSON document.", "Add Group")
+            return
+        }
+        val editor = viewerService.getActiveModelEditor()
+        val document = editor?.document
+            ?: activeFile.let {
+                com.intellij.openapi.fileEditor.FileDocumentManager.getInstance().getDocument(it)
+            }
+        if (document == null) {
+            Messages.showInfoMessage(project, "No active JSON document.", "Add Group")
+            return
+        }
+        val updated = insertGroupIntoJson(document.text)
+        if (updated == null) {
+            Messages.showInfoMessage(project, "Unable to insert a groups array.", "Add Group")
+            return
+        }
+        com.intellij.openapi.command.WriteCommandAction.runWriteCommandAction(project) {
+            document.setText(updated)
+        }
+        onUpdated()
+    }
+
+    private fun insertGroupIntoJson(text: String): String? {
+        val groupsRange = findJsonArrayRange(text, "groups")
+        return if (groupsRange != null) {
+            insertIntoArray(text, groupsRange)
+        } else {
+            insertGroupsProperty(text)
+        }
+    }
+
+    private fun buildGroupJson(indent: String): String {
+        val fieldIndent = indent + "  "
+        return "{\n" +
+            "$fieldIndent\"name\": \"\",\n" +
+            "$fieldIndent\"origin\": [0, 0, 0],\n" +
+            "$fieldIndent\"color\": 0,\n" +
+            "$fieldIndent\"children\": []\n" +
+            "$indent}"
+    }
+
+    private fun insertIntoArray(text: String, range: IntRange): String {
+        val arrayStart = range.first
+        val arrayEnd = range.last
+        val content = text.substring(arrayStart + 1, arrayEnd)
+        val hasItems = content.any { !it.isWhitespace() }
+        val itemIndent = findArrayItemIndent(text, arrayStart, arrayEnd)
+        val payload = buildGroupJson(itemIndent)
+        val insertText = if (hasItems) {
+            ",\n$itemIndent$payload\n"
+        } else {
+            "\n$itemIndent$payload\n"
+        }
+        return text.substring(0, arrayEnd) + insertText + text.substring(arrayEnd)
+    }
+
+    private fun insertGroupsProperty(text: String): String? {
+        val insertPos = text.lastIndexOf('}')
+        if (insertPos <= 0) return null
+        val baseIndent = findLineIndent(text, insertPos)
+        val propertyIndent = baseIndent + "  "
+        val payload = buildGroupJson(propertyIndent)
+        val trimmed = text.substring(0, insertPos).trimEnd()
+        val needsComma = !trimmed.endsWith("{")
+        val prefix = if (needsComma) ",\n" else "\n"
+        val propertyBlock =
+            "\"groups\": [\n$propertyIndent$payload\n$baseIndent]"
+        return text.substring(0, insertPos) +
+            prefix +
+            baseIndent +
+            propertyBlock +
+            "\n" +
+            text.substring(insertPos)
+    }
+
+    private fun findJsonArrayRange(text: String, key: String): IntRange? {
+        val keyToken = "\"$key\""
+        var startIdx = text.indexOf(keyToken)
+        while (startIdx >= 0) {
+            var i = startIdx + keyToken.length
+            while (i < text.length && text[i].isWhitespace()) i++
+            if (i >= text.length || text[i] != ':') {
+                startIdx = text.indexOf(keyToken, startIdx + 1)
+                continue
+            }
+            i++
+            while (i < text.length && text[i].isWhitespace()) i++
+            if (i >= text.length || text[i] != '[') {
+                startIdx = text.indexOf(keyToken, startIdx + 1)
+                continue
+            }
+            val arrayStart = i
+            var depth = 0
+            var inString = false
+            var escaped = false
+            while (i < text.length) {
+                val ch = text[i]
+                if (inString) {
+                    if (escaped) {
+                        escaped = false
+                    } else if (ch == '\\') {
+                        escaped = true
+                    } else if (ch == '"') {
+                        inString = false
+                    }
+                } else {
+                    when (ch) {
+                        '"' -> inString = true
+                        '[' -> depth++
+                        ']' -> {
+                            depth--
+                            if (depth == 0) {
+                                return arrayStart..i
+                            }
+                        }
+                    }
+                }
+                i++
+            }
+            return null
+        }
+        return null
+    }
+
+    private fun findArrayItemIndent(text: String, arrayStart: Int, arrayEnd: Int): String {
+        var i = arrayStart + 1
+        var lastLineStart = -1
+        while (i < arrayEnd) {
+            val ch = text[i]
+            if (ch == '\n') {
+                lastLineStart = i + 1
+            }
+            if (!ch.isWhitespace()) {
+                if (lastLineStart >= 0) {
+                    return text.substring(lastLineStart, i)
+                }
+                break
+            }
+            i++
+        }
+        val baseIndent = findLineIndent(text, arrayStart)
+        return baseIndent + "  "
+    }
+
+    private fun findLineIndent(text: String, index: Int): String {
+        val lineStart = text.lastIndexOf('\n', index).let { if (it == -1) 0 else it + 1 }
+        var i = lineStart
+        while (i < text.length && (text[i] == ' ' || text[i] == '\t')) {
+            i++
+        }
+        return text.substring(lineStart, i)
+    }
+
+    private fun registerTabStyleUpdater(tabbedPane: JTabbedPane) {
+        tabbedPane.addChangeListener { updateTabHeaderStyles(tabbedPane) }
+        updateTabHeaderStyles(tabbedPane)
+    }
+
+    private fun updateTabHeaderStyles(tabbedPane: JTabbedPane) {
+        for (i in 0 until tabbedPane.tabCount) {
+            val tabComponent = tabbedPane.getTabComponentAt(i) as? JComponent ?: continue
+            val label = tabComponent.getClientProperty(TAB_LABEL_KEY) as? JBLabel ?: continue
+            val selected = i == tabbedPane.selectedIndex
+            label.foreground = if (selected) TAB_TEXT_SELECTED_COLOR else TAB_TEXT_COLOR
+            tabComponent.background = if (selected) TAB_BG_SELECTED_COLOR else TAB_BG_COLOR
+        }
+    }
+
+    private fun createDraggableTabbedPane(): JTabbedPane {
+        val tabbedPane = JTabbedPane()
+        tabbedPane.tabLayoutPolicy = JTabbedPane.SCROLL_TAB_LAYOUT
+        tabbedPane.isOpaque = false
+        var dragIndex = -1
+        tabbedPane.addMouseListener(object : MouseAdapter() {
+            override fun mousePressed(e: MouseEvent) {
+                if (SwingUtilities.isLeftMouseButton(e)) {
+                    dragIndex = tabbedPane.indexAtLocation(e.x, e.y)
+                }
+            }
+
+            override fun mouseReleased(e: MouseEvent) {
+                dragIndex = -1
+            }
+        })
+        tabbedPane.addMouseMotionListener(object : MouseAdapter() {
+            override fun mouseDragged(e: MouseEvent) {
+                if (dragIndex < 0) return
+                val targetIndex = tabbedPane.indexAtLocation(e.x, e.y)
+                if (targetIndex >= 0 && targetIndex != dragIndex) {
+                    moveTab(tabbedPane, dragIndex, targetIndex)
+                    dragIndex = targetIndex
+                }
+            }
+        })
+        return tabbedPane
+    }
+
+    private fun addClosableTab(
+        tabbedPane: JTabbedPane,
+        title: String,
+        icon: Icon,
+        content: JComponent
+    ) {
+        tabbedPane.addTab(title, icon, content)
+        val index = tabbedPane.indexOfComponent(content)
+        tabbedPane.setTabComponentAt(index, createClosableTabComponent(tabbedPane, title, icon))
+        updateTabHeaderStyles(tabbedPane)
+    }
+
+    private fun createClosableTabComponent(
+        tabbedPane: JTabbedPane,
+        title: String,
+        icon: Icon
+    ): JComponent {
+        val label = JBLabel(title, icon, SwingConstants.LEFT).apply {
+            foreground = TAB_TEXT_COLOR
+            font = font.deriveFont(Font.BOLD)
+        }
+        val closeButton = JButton(AllIcons.Actions.Close).apply {
+            isOpaque = false
+            border = JBUI.Borders.empty()
+            isContentAreaFilled = false
+            isFocusable = false
+            preferredSize = JBUI.size(16, 16)
+        }
+        val panel = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(4), 0)).apply {
+            isOpaque = true
+            background = TAB_BG_COLOR
+            border = JBUI.Borders.empty(4, 8, 4, 6)
+            add(label)
+            add(closeButton)
+        }
+        panel.putClientProperty(TAB_LABEL_KEY, label)
+        closeButton.addActionListener {
+            val index = tabbedPane.indexOfTabComponent(panel)
+            if (index != -1) {
+                tabbedPane.removeTabAt(index)
+                updateTabHeaderStyles(tabbedPane)
+            }
+        }
+        return panel
+    }
+
+    private fun moveTab(tabbedPane: JTabbedPane, fromIndex: Int, toIndex: Int) {
+        if (fromIndex == toIndex) return
+        val component = tabbedPane.getComponentAt(fromIndex)
+        val title = tabbedPane.getTitleAt(fromIndex)
+        val icon = tabbedPane.getIconAt(fromIndex)
+        val tip = tabbedPane.getToolTipTextAt(fromIndex)
+        val enabled = tabbedPane.isEnabledAt(fromIndex)
+        val tabComponent = tabbedPane.getTabComponentAt(fromIndex)
+
+        tabbedPane.removeTabAt(fromIndex)
+        tabbedPane.insertTab(title, icon, component, tip, toIndex)
+        tabbedPane.setEnabledAt(toIndex, enabled)
+        if (tabComponent != null) {
+            tabbedPane.setTabComponentAt(toIndex, tabComponent)
+        }
+        tabbedPane.selectedIndex = toIndex
+        updateTabHeaderStyles(tabbedPane)
+    }
+
+    private class TextureListRenderer : ListCellRenderer<TextureEntry> {
+        override fun getListCellRendererComponent(
+            list: JList<out TextureEntry>,
+            value: TextureEntry?,
+            index: Int,
+            isSelected: Boolean,
+            cellHasFocus: Boolean
+        ): Component {
+            val panel = JPanel(BorderLayout())
+            panel.border = JBUI.Borders.empty(4, 6)
+            panel.background = if (isSelected) JBColor(0x3b3f46, 0x3b3f46) else list.background
+
+            val nameLabel = JBLabel(value?.key ?: "")
+            val metaLabel = JBLabel(value?.value ?: "").apply {
+                foreground = JBColor.GRAY
+            }
+
+            val textPanel = JPanel()
+            textPanel.layout = BoxLayout(textPanel, BoxLayout.Y_AXIS)
+            textPanel.isOpaque = false
+            textPanel.add(nameLabel)
+            textPanel.add(metaLabel)
+
+            panel.add(textPanel, BorderLayout.CENTER)
+            return panel
+        }
+    }
+
+    private class ElementsTreeRenderer(private val state: ElementsPanelState) : TreeCellRenderer {
+        private val panel = JPanel(BorderLayout())
+        private val leftPanel = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0))
+        private val nameLabel = JBLabel()
+        private val metaLabel = JBLabel()
+        private val eyeLabel = JBLabel(AllIcons.General.InspectionsEye)
+
+        init {
+            panel.border = JBUI.Borders.empty(4, 6)
+            leftPanel.isOpaque = false
+            metaLabel.foreground = JBColor.GRAY
+            leftPanel.add(nameLabel)
+            leftPanel.add(metaLabel)
+            panel.add(leftPanel, BorderLayout.WEST)
+            panel.add(eyeLabel, BorderLayout.EAST)
+        }
+
+        override fun getTreeCellRendererComponent(
+            tree: JTree,
+            value: Any?,
+            selected: Boolean,
+            expanded: Boolean,
+            leaf: Boolean,
+            row: Int,
+            hasFocus: Boolean
+        ): Component {
+            val node = value as? DefaultMutableTreeNode
+            val item = node?.userObject as? ElementTreeItem
+            val isElement = item?.kind == ElementNodeKind.ELEMENT
+            val isGroup = item?.kind == ElementNodeKind.GROUP
+            val name = item?.name ?: ""
+
+            panel.background = if (selected) JBColor(0x3b3f46, 0x3b3f46) else tree.background
+            panel.isOpaque = true
+            nameLabel.icon = null
+            nameLabel.text = when {
+                name.isNotBlank() -> name
+                isGroup -> "(unnamed)"
+                else -> ""
+            }
+            metaLabel.text = if (isElement && item?.index != null) "#${item.index}" else ""
+
+            if (isElement && item?.index != null) {
+                val hidden = state.hiddenElements.contains(item.index)
+                eyeLabel.isVisible = true
+                eyeLabel.isEnabled = !hidden
+            } else {
+                eyeLabel.isVisible = false
+            }
+
+            return panel
+        }
+    }
 
     private fun dumpUiManagerKeysOnce() {
         if (!uiManagerDumped) {
