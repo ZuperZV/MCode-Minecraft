@@ -27,12 +27,14 @@ import org.cef.handler.CefLoadHandlerAdapter
 import java.awt.Color
 import java.awt.Font
 import java.math.BigDecimal
+import java.io.File
 
 @Service(Service.Level.PROJECT)
 class ModelViewerService(private val project: Project) {
 
     private val logger = Logger.getInstance(ModelViewerService::class.java)
     private val settings = ApplicationManager.getApplication().getService(ModelViewerSettings::class.java)
+    private val useAxisRotationFormat = detectAxisRotationFormat()
 
     val TEXT_HIGHLIGHT_TEXT: Color =
         JBColor.namedColor(
@@ -237,6 +239,10 @@ class ModelViewerService(private val project: Project) {
         return suppressAutoPreview
     }
 
+    fun useAxisRotationFormat(): Boolean {
+        return useAxisRotationFormat
+    }
+
     fun setViewMode(mode: String) {
         val normalized = normalizeViewMode(mode)
         viewMode = normalized
@@ -420,13 +426,18 @@ class ModelViewerService(private val project: Project) {
         val toValues = readVector(root, "to") ?: return
         val rotationObj = root.get("rotation")?.takeIf { it.isJsonObject }?.asJsonObject
         val rotation = rotationObj?.let { obj ->
-            val origin = readVector(obj, "origin")
-            val axis = obj.get("axis")?.asString
+            val origin = readVector(obj, "origin") ?: return@let null
+            val x = obj.get("x")?.asDouble
+            val y = obj.get("y")?.asDouble
+            val z = obj.get("z")?.asDouble
+            val axis = obj.get("axis")?.asString?.lowercase()
             val angle = obj.get("angle")?.asDouble
-            if (origin == null || axis.isNullOrBlank() || angle == null) {
-                null
-            } else {
-                RotationUpdate(angle, axis, origin)
+            when {
+                x != null && y != null && z != null ->
+                    RotationUpdate(origin, x = x, y = y, z = z)
+                axis != null && angle != null ->
+                    RotationUpdate(origin, axis = axis, angle = angle)
+                else -> null
             }
         }
         val editor = resolveActiveEditorForUpdate() ?: return
@@ -460,16 +471,31 @@ class ModelViewerService(private val project: Project) {
     }
 
     private data class RotationUpdate(
-        val angle: Double,
-        val axis: String,
-        val origin: DoubleArray
+        val origin: DoubleArray,
+        val x: Double? = null,
+        val y: Double? = null,
+        val z: Double? = null,
+        val axis: String? = null,
+        val angle: Double? = null
     )
 
     private fun replaceArray(text: String, key: String, values: DoubleArray): String {
-        val numbers = values.joinToString(", ") { formatNumber(it) }
-        val pattern = Regex("(?s)(\"$key\"\\s*:\\s*)\\[[\\s\\S]*?\\]")
+        val pattern = Regex("(?s)(\"$key\"\\s*:\\s*)(\\[[\\s\\S]*?\\])")
         return pattern.replace(text) { match ->
-            "${match.groupValues[1]}[$numbers]"
+            val prefix = match.groupValues[1]
+            val arrayText = match.groupValues[2]
+            var index = 0
+            val numberPattern = Regex("-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?")
+            val updatedArray = numberPattern.replace(arrayText) { numberMatch ->
+                if (index < values.size) {
+                    val formatted = formatNumber(values[index])
+                    index += 1
+                    formatted
+                } else {
+                    numberMatch.value
+                }
+            }
+            "$prefix$updatedArray"
         }
     }
 
@@ -480,25 +506,79 @@ class ModelViewerService(private val project: Project) {
         val rotationPattern = Regex("(?s)\"rotation\"\\s*:\\s*\\{[\\s\\S]*?\\}")
         val match = rotationPattern.find(text)
         val originNumbers = rotation.origin.joinToString(", ") { formatNumber(it) }
+        val rotationInline = if (useAxisRotationFormat) {
+            val axis = rotation.axis ?: resolveAxisFromComponents(rotation)
+            val angle = rotation.angle ?: resolveAngleFromComponents(rotation, axis)
+            "\"rotation\": {\"angle\": ${formatNumber(angle)}, \"axis\": \"$axis\", \"origin\": [$originNumbers]}"
+        } else {
+            val axis = rotation.axis ?: resolveAxisFromComponents(rotation)
+            val angle = rotation.angle ?: resolveAngleFromComponents(rotation, axis)
+            val x = rotation.x ?: if (axis == "x") angle else 0.0
+            val y = rotation.y ?: if (axis == "y") angle else 0.0
+            val z = rotation.z ?: if (axis == "z") angle else 0.0
+            "\"rotation\": {\"x\": ${formatNumber(x)}, \"y\": ${formatNumber(y)}, \"z\": ${formatNumber(z)}, \"origin\": [$originNumbers]}"
+        }
         if (match == null) {
             val facesMatch = Regex("\\n(\\s*)\"faces\"").find(text) ?: return text
             val indent = facesMatch.groupValues[1]
-            val rotationInline =
-                "\"rotation\": {\"angle\": ${formatNumber(rotation.angle)}, \"axis\": \"${rotation.axis}\", \"origin\": [$originNumbers]},"
             return text.replaceRange(
                 facesMatch.range.first,
                 facesMatch.range.first,
-                "\n$indent$rotationInline"
+                "\n$indent$rotationInline,"
             )
         }
-        var block = match.value
-        block = Regex("(\"angle\"\\s*:\\s*)-?\\d+(?:\\.\\d+)?")
-            .replace(block) { m -> "${m.groupValues[1]}${formatNumber(rotation.angle)}" }
-        block = Regex("(\"axis\"\\s*:\\s*)\"[^\"]*\"")
-            .replace(block) { m -> "${m.groupValues[1]}\"${rotation.axis}\"" }
-        block = Regex("(?s)(\"origin\"\\s*:\\s*)\\[[\\s\\S]*?\\]")
-            .replace(block) { m -> "${m.groupValues[1]}[$originNumbers]" }
-        return text.replaceRange(match.range, block)
+        return text.replaceRange(match.range, rotationInline)
+    }
+
+    private fun resolveAxisFromComponents(rotation: RotationUpdate): String {
+        val x = kotlin.math.abs(rotation.x ?: 0.0)
+        val y = kotlin.math.abs(rotation.y ?: 0.0)
+        val z = kotlin.math.abs(rotation.z ?: 0.0)
+        return when {
+            x >= y && x >= z -> "x"
+            y >= x && y >= z -> "y"
+            else -> "z"
+        }
+    }
+
+    private fun resolveAngleFromComponents(rotation: RotationUpdate, axis: String): Double {
+        return when (axis) {
+            "x" -> rotation.x ?: 0.0
+            "y" -> rotation.y ?: 0.0
+            "z" -> rotation.z ?: 0.0
+            else -> rotation.y ?: 0.0
+        }
+    }
+
+    private fun detectAxisRotationFormat(): Boolean {
+        val basePath = project.basePath ?: return false
+        val file = File(basePath, "gradle.properties")
+        if (!file.exists()) {
+            return false
+        }
+        val versionLine = file.readLines()
+            .firstOrNull { it.trim().startsWith("minecraft_version") } ?: return false
+        val match = Regex("minecraft_version\\s*=\\s*([^#\\s]+)").find(versionLine) ?: return false
+        val version = parseVersion(match.groupValues[1]) ?: return false
+        return version < McVersion(1, 21, 11)
+    }
+
+    private data class McVersion(val major: Int, val minor: Int, val patch: Int) : Comparable<McVersion> {
+        override fun compareTo(other: McVersion): Int {
+            if (major != other.major) return major.compareTo(other.major)
+            if (minor != other.minor) return minor.compareTo(other.minor)
+            return patch.compareTo(other.patch)
+        }
+    }
+
+    private fun parseVersion(raw: String): McVersion? {
+        val cleaned = raw.trim().replace(Regex("[^0-9.]"), "")
+        if (cleaned.isEmpty()) return null
+        val parts = cleaned.split('.')
+        val major = parts.getOrNull(0)?.toIntOrNull() ?: return null
+        val minor = parts.getOrNull(1)?.toIntOrNull() ?: 0
+        val patch = parts.getOrNull(2)?.toIntOrNull() ?: 0
+        return McVersion(major, minor, patch)
     }
 
     private fun formatNumber(value: Double): String {

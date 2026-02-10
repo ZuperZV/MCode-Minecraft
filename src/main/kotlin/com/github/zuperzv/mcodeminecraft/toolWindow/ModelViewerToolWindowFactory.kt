@@ -4,48 +4,32 @@ import com.github.zuperzv.mcodeminecraft.preview.ModelAutoPreviewService
 import com.github.zuperzv.mcodeminecraft.services.AssetServer
 import com.github.zuperzv.mcodeminecraft.services.ModelViewerService
 import com.intellij.icons.AllIcons
-import com.intellij.openapi.project.Project
+import com.intellij.openapi.actionSystem.ActionUpdateThread
+import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.DefaultActionGroup
+import com.intellij.openapi.actionSystem.ToggleAction
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.DumbAware
+import com.intellij.openapi.project.DumbAwareAction
+import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
-import com.intellij.openapi.diagnostic.Logger
-import com.intellij.ui.content.ContentFactory
 import com.intellij.ui.JBColor
-import com.intellij.ui.components.JBCheckBox
-import com.intellij.ui.components.JBLabel
-import com.intellij.ui.components.JBList
-import com.intellij.ui.components.JBScrollPane
-import com.intellij.ui.components.JBTextField
+import com.intellij.ui.components.*
+import com.intellij.ui.content.ContentFactory
 import com.intellij.ui.jcef.JBCefApp
 import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.util.ui.JBUI
-import com.intellij.openapi.actionSystem.ActionUpdateThread
-import com.intellij.openapi.actionSystem.DefaultActionGroup
-import com.intellij.openapi.actionSystem.ToggleAction
-import com.intellij.openapi.actionSystem.AnActionEvent
-import com.intellij.openapi.project.DumbAwareAction
-import com.intellij.openapi.ui.ComboBox
 import org.intellij.lang.annotations.Language
-import java.io.File
-import java.awt.BorderLayout
-import java.awt.Color
-import java.awt.Dimension
-import java.awt.FlowLayout
-import java.awt.Graphics
-import java.awt.Graphics2D
-import java.awt.RenderingHints
-import java.awt.geom.RoundRectangle2D
+import java.awt.*
 import java.awt.event.FocusAdapter
 import java.awt.event.FocusEvent
-import javax.swing.UIManager
+import java.awt.geom.RoundRectangle2D
+import java.io.File
+import javax.swing.*
 import javax.swing.plaf.basic.BasicSplitPaneDivider
 import javax.swing.plaf.basic.BasicSplitPaneUI
-import javax.swing.Box
-import javax.swing.BoxLayout
-import javax.swing.JButton
-import javax.swing.JPanel
-import javax.swing.JSplitPane
-import javax.swing.plaf.basic.BasicBorders
 
 class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
 
@@ -115,24 +99,58 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             }
         }
         viewerContainer.isOpaque = false
-        viewerContainer.border = JBUI.Borders.empty(52)
+        viewerContainer.border = JBUI.Borders.empty(20 + 1, 20 + 1, 20 + 1, 20 + 1)
 
-        val transformToolbar = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(8), JBUI.scale(6)))
+        val transformToolbar = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(2), JBUI.scale(4)))
+        transformToolbar.border = JBUI.Borders.empty(6, 6, 0, 6)
         transformToolbar.isOpaque = false
-        val modeBox = ComboBox(arrayOf("Move", "Rotate", "Scale"))
-        val spaceBox = ComboBox(arrayOf("Local", "World"))
-        val axisBox = ComboBox(arrayOf("X", "Y", "Z"))
-        axisBox.selectedItem = "Y"
-        val snapField = JBTextField("1").apply { columns = 4 }
-        transformToolbar.add(JBLabel("Mode"))
-        transformToolbar.add(modeBox)
-        transformToolbar.add(JBLabel("Space"))
+        val moveButton = JToggleButton(AllIcons.General.Export).apply {
+            toolTipText = "Move"
+            isSelected = true
+            margin = JBUI.insets(2, 3)
+            preferredSize = JBUI.size(28, 28)
+        }
+        val rotateButton = JToggleButton(AllIcons.General.Refresh).apply {
+            toolTipText = "Rotate"
+            margin = JBUI.insets(2, 3)
+            preferredSize = JBUI.size(28, 28)
+        }
+        val scaleButton = JToggleButton(AllIcons.Diff.ArrowLeftRight).apply {
+            toolTipText = "Scale"
+            margin = JBUI.insets(2, 3)
+            preferredSize = JBUI.size(28, 28)
+        }
+        val modeGroup = ButtonGroup().apply {
+            add(moveButton)
+            add(rotateButton)
+            add(scaleButton)
+        }
+        val spaceBox = ComboBox(arrayOf("Local", "World")).apply {
+            toolTipText = "Local/Global"
+            preferredSize = JBUI.size(84, 28)
+        }
+        val spacer = JBLabel("|").apply {
+            preferredSize = JBUI.size(7, 28)
+            horizontalAlignment = JBLabel.CENTER
+        }
+        val snapIcon = JBLabel(AllIcons.Actions.TraceOver).apply {
+            toolTipText = "Snap"
+            preferredSize = JBUI.size(28, 28)
+            horizontalAlignment = JBLabel.CENTER
+        }
+        val snapField = JBTextField("1").apply {
+            columns = 4
+            toolTipText = "Snap (Shift = 0.25)"
+            preferredSize = JBUI.size(42, 28)
+        }
+        transformToolbar.add(moveButton)
+        transformToolbar.add(rotateButton)
+        transformToolbar.add(scaleButton)
         transformToolbar.add(spaceBox)
-        transformToolbar.add(JBLabel("Axis"))
-        transformToolbar.add(axisBox)
-        transformToolbar.add(JBLabel("Snap"))
+        transformToolbar.add(spacer)
+        transformToolbar.add(snapIcon)
         transformToolbar.add(snapField)
-        transformToolbar.add(JBLabel("Shift=0.25"))
+        transformToolbar.alignmentY -= 40
         viewerContainer.add(transformToolbar, BorderLayout.NORTH)
         viewerContainer.add(viewerPanel, BorderLayout.CENTER)
 
@@ -143,25 +161,25 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             }
         }
 
-        modeBox.addActionListener {
-            val selected = modeBox.selectedItem as? String ?: "Move"
-            val mode = when (selected) {
-                "Rotate" -> "rotate"
-                "Scale" -> "scale"
-                else -> "translate"
+        moveButton.addActionListener {
+            if (moveButton.isSelected) {
+                viewerService.setTransformMode("translate")
             }
-            axisBox.isEnabled = mode == "rotate"
-            viewerService.setTransformMode(mode)
+        }
+        rotateButton.addActionListener {
+            if (rotateButton.isSelected) {
+                viewerService.setTransformMode("rotate")
+            }
+        }
+        scaleButton.addActionListener {
+            if (scaleButton.isSelected) {
+                viewerService.setTransformMode("scale")
+            }
         }
         spaceBox.addActionListener {
             val selected = spaceBox.selectedItem as? String ?: "Local"
             val space = if (selected.equals("World", true)) "world" else "local"
             viewerService.setTransformSpace(space)
-        }
-        axisBox.addActionListener {
-            val selected = axisBox.selectedItem as? String ?: "Y"
-            val axis = selected.lowercase()
-            viewerService.setTransformAxis(axis)
         }
         snapField.addActionListener { updateSnapFromField() }
         snapField.addFocusListener(object : FocusAdapter() {
@@ -169,7 +187,6 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 updateSnapFromField()
             }
         })
-        axisBox.isEnabled = false
 
         val browser = if (JBCefApp.isSupported()) {
             try {
@@ -365,7 +382,14 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             println("Hover injection length: " + hoverInjection.length)
             println("Hover injection: " + hoverInjection)
             it.loadHTML(
-                viewerHtml(projectRoot, assetServerPort, hoverInjection, transformInjection, selectionInjection),
+                viewerHtml(
+                    projectRoot,
+                    assetServerPort,
+                    hoverInjection,
+                    transformInjection,
+                    selectionInjection,
+                    viewerService.useAxisRotationFormat()
+                ),
                 "http://localhost/"
             )
             it.openDevtools()
@@ -380,7 +404,8 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         assetPort: Int,
         hoverInjection: String,
         transformInjection: String,
-        selectionInjection: String
+        selectionInjection: String,
+        useAxisRotationFormat: Boolean
     ) = """
         <html>
         <body style="margin:0; overflow:hidden;">
@@ -391,6 +416,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         
         <script>
         console.log("Viewer JS running")
+        const ROTATION_FORMAT = "${if (useAxisRotationFormat) "axis" else "xyz"}"
         window.addEventListener("error", (e)=>console.error("Viewer JS error:", e.message, e.error))
         const sendHover = (msg)=>{
             const hoverElement = msg
@@ -574,6 +600,8 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         let snapStep = 1
         let isShiftDown = false
         let isTransforming = false
+        const useAxisRotation = ROTATION_FORMAT === "axis"
+        let lastRotationAxis = "y"
         let wasTransforming = false
         let sourceModel = null
         let sourceElements = null
@@ -594,6 +622,15 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             transformControls.setSpace(transformSpace)
             updateTransformSnaps()
             updateTransformAxisVisibility()
+            transformControls.addEventListener("mouseDown", ()=>{
+                if(!useAxisRotation || transformMode !== "rotate"){
+                    return
+                }
+                const axis = String(transformControls.axis || "").toLowerCase()
+                if(axis === "x" || axis === "y" || axis === "z"){
+                    lastRotationAxis = axis
+                }
+            })
             transformControls.addEventListener("dragging-changed", (event)=>{
                 isTransforming = event.value
                 if(event.value){
@@ -1065,7 +1102,15 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         function updateTransformAttachment(){
             if(!transformControls) return
             if(selectedState.active){
-                transformControls.attach(selectedState.active)
+                const root = selectedState.active?.userData?.root
+                const pivot = selectedState.active?.userData?.pivot
+                let target = selectedState.active
+                if(transformMode === "rotate" && pivot){
+                    target = pivot
+                }else if(transformMode === "translate" && root){
+                    target = root
+                }
+                transformControls.attach(target)
                 transformControls.visible = true
                 if(typeof transformControls.update === "function"){
                     transformControls.update()
@@ -1097,7 +1142,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             }
             const outline = selectedState.outlines.get(mesh)
             if(outline){
-                scene.remove(outline)
+                outline.parent?.remove(outline)
                 if(outline.children && outline.children.length){
                     outline.children.forEach(child=>{
                         if(child.geometry && child.geometry.dispose){
@@ -1149,16 +1194,13 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                     opacity: index === 0 ? 0.95 : 0.45
                 })
                 const outline = new THREE.LineSegments(outlineGeom, outlineMat)
-                outline.position.copy(mesh.position)
-                outline.rotation.copy(mesh.rotation)
-                outline.scale.copy(mesh.scale).multiplyScalar(scale)
+                outline.scale.set(scale, scale, scale)
                 outline.renderOrder = 10
                 outline.userData.ignoreViewMode = true
                 outlineGroup.add(outline)
             })
-            mesh.updateMatrixWorld()
             outlineGroup.renderOrder = 10
-            scene.add(outlineGroup)
+            mesh.add(outlineGroup)
             selectedState.outlines.set(mesh, outlineGroup)
             selectedState.active = mesh
             updateTransformAttachment()
@@ -1167,15 +1209,9 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
 
         function updateTransformAxisVisibility(){
             if(!transformControls) return
-            if(transformMode !== "rotate"){
-                transformControls.showX = true
-                transformControls.showY = true
-                transformControls.showZ = true
-                return
-            }
-            transformControls.showX = transformAxis === "x"
-            transformControls.showY = transformAxis === "y"
-            transformControls.showZ = transformAxis === "z"
+            transformControls.showX = true
+            transformControls.showY = true
+            transformControls.showZ = true
         }
 
         function updateTransformSnaps(){
@@ -1194,6 +1230,22 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             return values.map(roundValue)
         }
 
+        function pickRotationAxis(mesh, fallback){
+            const rx = Math.abs(mesh.rotation.x)
+            const ry = Math.abs(mesh.rotation.y)
+            const rz = Math.abs(mesh.rotation.z)
+            if(rx >= ry && rx >= rz){
+                return "x"
+            }
+            if(ry >= rx && ry >= rz){
+                return "y"
+            }
+            if(rz >= rx && rz >= ry){
+                return "z"
+            }
+            return fallback || "y"
+        }
+
         function commitTransformUpdate(){
             const mesh = selectedState.active
             if(!mesh || !sourceElements){
@@ -1207,52 +1259,101 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             if(!element){
                 return
             }
+            const baseSize = mesh.userData?.baseSize
+            if(!baseSize){
+                return
+            }
             const oldCenter = new THREE.Vector3(
                 (element.from?.[0] ?? 0) + ((element.to?.[0] ?? 0) - (element.from?.[0] ?? 0)) / 2,
                 (element.from?.[1] ?? 0) + ((element.to?.[1] ?? 0) - (element.from?.[1] ?? 0)) / 2,
                 (element.from?.[2] ?? 0) + ((element.to?.[2] ?? 0) - (element.from?.[2] ?? 0)) / 2
             )
-            const baseSize = mesh.userData?.baseSize
-            if(!baseSize){
-                return
-            }
+            const worldScale = new THREE.Vector3()
+            mesh.getWorldScale(worldScale)
             const size = new THREE.Vector3(
-                baseSize.x * mesh.scale.x,
-                baseSize.y * mesh.scale.y,
-                baseSize.z * mesh.scale.z
+                baseSize.x * worldScale.x,
+                baseSize.y * worldScale.y,
+                baseSize.z * worldScale.z
             )
-            const center = mesh.position.clone().add(currentModelCenter)
+            const meshWorld = new THREE.Vector3()
+            mesh.getWorldPosition(meshWorld)
+            const center = meshWorld.clone().add(currentModelCenter)
             const delta = center.clone().sub(oldCenter)
-            const from = [
+            const computedFrom = [
                 center.x - size.x / 2,
                 center.y - size.y / 2,
                 center.z - size.z / 2
             ]
-            const to = [
+            const computedTo = [
                 center.x + size.x / 2,
                 center.y + size.y / 2,
                 center.z + size.z / 2
             ]
+            const from = (transformMode === "rotate" && Array.isArray(element.from)) ? element.from.slice() : computedFrom
+            const to = (transformMode === "rotate" && Array.isArray(element.to)) ? element.to.slice() : computedTo
             const existingRotation = element.rotation ?? null
-            const axis = existingRotation?.axis ?? transformAxis
-            const angleRad = mesh.rotation[axis]
-            let rotation = null
             const includeRotation = !!existingRotation || transformMode === "rotate"
+            let rotation = null
             if(includeRotation){
                 let origin = null
-                if(existingRotation?.origin && existingRotation.origin.length >= 3){
+                const useDelta = transformMode !== "rotate"
+                const pivot = mesh.userData?.pivot
+                if(pivot){
+                    const originWorld = new THREE.Vector3()
+                    pivot.getWorldPosition(originWorld)
                     origin = [
-                        existingRotation.origin[0] + delta.x,
-                        existingRotation.origin[1] + delta.y,
-                        existingRotation.origin[2] + delta.z
+                        originWorld.x + currentModelCenter.x,
+                        originWorld.y + currentModelCenter.y,
+                        originWorld.z + currentModelCenter.z
+                    ]
+                }else if(existingRotation?.origin && existingRotation.origin.length >= 3){
+                    origin = [
+                        existingRotation.origin[0] + (useDelta ? delta.x : 0),
+                        existingRotation.origin[1] + (useDelta ? delta.y : 0),
+                        existingRotation.origin[2] + (useDelta ? delta.z : 0)
                     ]
                 }else{
                     origin = [center.x, center.y, center.z]
                 }
-                rotation = {
-                    origin: origin,
-                    axis: axis,
-                    angle: THREE.MathUtils.radToDeg(angleRad)
+                const rotTarget = pivot || mesh
+                if(useAxisRotation){
+                    const existingAxis = typeof existingRotation?.axis === "string"
+                        ? existingRotation.axis.toLowerCase()
+                        : null
+                    const controlAxis = String(transformControls?.axis || "").toLowerCase()
+                    let axis = (controlAxis && ["x","y","z"].includes(controlAxis)) ? controlAxis : null
+                    if(!axis && lastRotationAxis){
+                        axis = lastRotationAxis
+                    }
+                    if(!axis && existingAxis && ["x","y","z"].includes(existingAxis)){
+                        axis = existingAxis
+                    }
+                    if(!axis){
+                        axis = "y"
+                    }
+                    if(axis !== lastRotationAxis){
+                        lastRotationAxis = axis
+                    }
+                    const angle = axis === "x"
+                        ? THREE.MathUtils.radToDeg(rotTarget.rotation.x)
+                        : axis === "y"
+                            ? THREE.MathUtils.radToDeg(rotTarget.rotation.y)
+                            : THREE.MathUtils.radToDeg(rotTarget.rotation.z)
+                    rotation = {
+                        origin: origin,
+                        axis: axis,
+                        angle: angle
+                    }
+                    const normalized = { x: 0, y: 0, z: 0 }
+                    normalized[axis] = THREE.MathUtils.degToRad(angle)
+                    rotTarget.rotation.set(normalized.x, normalized.y, normalized.z)
+                }else{
+                    rotation = {
+                        origin: origin,
+                        x: THREE.MathUtils.radToDeg(rotTarget.rotation.x),
+                        y: THREE.MathUtils.radToDeg(rotTarget.rotation.y),
+                        z: THREE.MathUtils.radToDeg(rotTarget.rotation.z)
+                    }
                 }
             }
             const payload = {
@@ -1261,8 +1362,9 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 to: roundVec(to),
                 rotation: rotation ? {
                     origin: roundVec(rotation.origin),
-                    axis: rotation.axis,
-                    angle: roundValue(rotation.angle)
+                    ...(useAxisRotation
+                        ? { axis: rotation.axis, angle: roundValue(rotation.angle) }
+                        : { x: roundValue(rotation.x), y: roundValue(rotation.y), z: roundValue(rotation.z) })
                 } : null
             }
             element.from = payload.from.slice()
@@ -1500,31 +1602,53 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 })
 
                 const mesh = new THREE.Mesh(geometry, materials)
-                mesh.position.set(
-                    el.from[0]+sx/2 - center.x,
-                    el.from[1]+sy/2 - center.y,
-                    el.from[2]+sz/2 - center.z
+                const elementCenter = new THREE.Vector3(
+                    el.from[0] + sx / 2,
+                    el.from[1] + sy / 2,
+                    el.from[2] + sz / 2
                 )
-                if(el.rotation && Number.isFinite(el.rotation.angle) && el.rotation.axis && el.rotation.origin){
-                    const axisName = el.rotation.axis
-                    const axisVec = axisName === "x" ? new THREE.Vector3(1,0,0)
-                        : axisName === "y" ? new THREE.Vector3(0,1,0)
-                        : new THREE.Vector3(0,0,1)
-                    const angleRad = THREE.MathUtils.degToRad(el.rotation.angle)
-                    const origin = new THREE.Vector3(
+                const elementRoot = new THREE.Object3D()
+                elementRoot.position.set(
+                    elementCenter.x - center.x,
+                    elementCenter.y - center.y,
+                    elementCenter.z - center.z
+                )
+                let rotationOrigin = elementCenter.clone()
+                if(el.rotation?.origin && el.rotation.origin.length >= 3){
+                    rotationOrigin = new THREE.Vector3(
                         el.rotation.origin[0],
                         el.rotation.origin[1],
                         el.rotation.origin[2]
                     )
-                    const pivot = origin.sub(center)
-                    mesh.position.sub(pivot)
-                    mesh.position.applyAxisAngle(axisVec, angleRad)
-                    mesh.position.add(pivot)
-                    mesh.rotateOnAxis(axisVec, angleRad)
+                }
+                const originOffset = rotationOrigin.clone().sub(elementCenter)
+                const pivot = new THREE.Object3D()
+                pivot.position.copy(originOffset)
+                elementRoot.add(pivot)
+                mesh.position.set(-originOffset.x, -originOffset.y, -originOffset.z)
+                pivot.add(mesh)
+
+                if(el.rotation){
+                    if(Number.isFinite(el.rotation.x) || Number.isFinite(el.rotation.y) || Number.isFinite(el.rotation.z)){
+                        const rx = THREE.MathUtils.degToRad(el.rotation.x || 0)
+                        const ry = THREE.MathUtils.degToRad(el.rotation.y || 0)
+                        const rz = THREE.MathUtils.degToRad(el.rotation.z || 0)
+                        pivot.rotation.set(rx, ry, rz)
+                    }else if(Number.isFinite(el.rotation.angle) && el.rotation.axis){
+                        const axisName = el.rotation.axis
+                        const axisVec = axisName === "x" ? new THREE.Vector3(1,0,0)
+                            : axisName === "y" ? new THREE.Vector3(0,1,0)
+                            : new THREE.Vector3(0,0,1)
+                        const angleRad = THREE.MathUtils.degToRad(el.rotation.angle)
+                        pivot.quaternion.setFromAxisAngle(axisVec, angleRad)
+                        pivot.rotation.setFromQuaternion(pivot.quaternion)
+                    }
                 }
                 mesh.userData.elementIndex = elementIndex
                 mesh.userData.baseSize = { x: sx, y: sy, z: sz }
-                scene.add(mesh)
+                mesh.userData.root = elementRoot
+                mesh.userData.pivot = pivot
+                scene.add(elementRoot)
                 pickableMeshes.push(mesh)
             })
             applyViewMode(viewMode)
@@ -1567,6 +1691,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             if(transformControls){
                 transformControls.setMode(transformMode)
                 updateTransformAxisVisibility()
+                updateTransformAttachment()
             }
         }
 
