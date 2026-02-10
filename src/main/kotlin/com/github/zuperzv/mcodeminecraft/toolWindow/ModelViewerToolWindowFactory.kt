@@ -398,6 +398,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 setMeshHighlight(hoverState.object, false)
                 hoverState.object = null
             }
+            clearSelection()
         }
 
         function updateOrthoFrustum(){
@@ -478,6 +479,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         let originalMaterialColors = new WeakMap()
         const viewModeDefaults = new WeakMap()
         const hoverState = { object: null }
+        const selectedState = { object: null, outline: null }
         let hoverDebugLogged = false
         let viewMode = "textured"
         let gridEnabled = false
@@ -931,6 +933,42 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             })
         }
 
+        function clearSelection(){
+            const selected = selectedState.object
+            if(selected && selected !== hoverState.object){
+                setMeshHighlight(selected, false)
+            }
+            if(selectedState.outline){
+                scene.remove(selectedState.outline)
+                selectedState.outline.geometry.dispose()
+                if(selectedState.outline.material.dispose){
+                    selectedState.outline.material.dispose()
+                }
+                selectedState.outline = null
+            }
+            selectedState.object = null
+        }
+
+        function setSelection(mesh){
+            if(selectedState.object === mesh){
+                return
+            }
+            clearSelection()
+            selectedState.object = mesh
+            setMeshHighlight(mesh, true)
+            const outlineGeom = new THREE.EdgesGeometry(mesh.geometry, 30)
+            const outlineMat = new THREE.LineBasicMaterial({ color: 0x3674c8})
+            const outline = new THREE.LineSegments(outlineGeom, outlineMat)
+            mesh.updateMatrixWorld()
+            outline.position.copy(mesh.position)
+            outline.rotation.copy(mesh.rotation)
+            outline.scale.copy(mesh.scale).multiplyScalar(1.0025)
+            outline.renderOrder = 10
+            outline.userData.ignoreViewMode = true
+            scene.add(outline)
+            selectedState.outline = outline
+        }
+
         function applyViewMode(mode){
             viewMode = (mode === "solid" || mode === "wireframe") ? mode : "textured"
             scene.traverse(obj=>{
@@ -1032,7 +1070,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             const hits = raycaster.intersectObjects(pickableMeshes, false)
             const next = hits.length ? hits[0].object : null
             if(next === hoverState.object) return
-            if(hoverState.object){
+            if(hoverState.object && hoverState.object !== selectedState.object){
                 setMeshHighlight(hoverState.object, false)
             }
             if(next){
@@ -1247,6 +1285,16 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         let isPanning = false
         let lastX = 0
         let lastY = 0
+        let clickStartX = 0
+        let clickStartY = 0
+        let clickStartButton = 0
+
+        function updatePointerFromEvent(e){
+            const rect = canvas.getBoundingClientRect()
+            pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1
+            pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1
+            hasPointer = true
+        }
 
         canvas.addEventListener("mousedown", (e)=>{
             if(e.button === 0){
@@ -1256,11 +1304,29 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             }
             lastX = e.clientX
             lastY = e.clientY
+            clickStartX = e.clientX
+            clickStartY = e.clientY
+            clickStartButton = e.button
+            updatePointerFromEvent(e)
         })
 
-        window.addEventListener("mouseup", ()=>{
+        window.addEventListener("mouseup", (e)=>{
             isDragging = false
             isPanning = false
+            if(clickStartButton === 0){
+                const dx = e.clientX - clickStartX
+                const dy = e.clientY - clickStartY
+                if(Math.hypot(dx, dy) < 4){
+                    updatePointerFromEvent(e)
+                    raycaster.setFromCamera(pointer, camera)
+                    const hits = raycaster.intersectObjects(pickableMeshes, false)
+                    if(hits.length){
+                        setSelection(hits[0].object)
+                    }else{
+                        clearSelection()
+                    }
+                }
+            }
         })
 
         window.addEventListener("mousemove", (e)=>{
@@ -1268,10 +1334,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             const dy = e.clientY - lastY
             lastX = e.clientX
             lastY = e.clientY
-            const rect = canvas.getBoundingClientRect()
-            pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1
-            pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1
-            hasPointer = true
+            updatePointerFromEvent(e)
             if(sendHover && !hoverHandshakeSent){
                 sendHover("-1")
                 hoverHandshakeSent = true
@@ -1301,7 +1364,9 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         canvas.addEventListener("mouseleave", ()=>{
             hasPointer = false
             if(hoverState.object){
-                setMeshHighlight(hoverState.object, false)
+                if(hoverState.object !== selectedState.object){
+                    setMeshHighlight(hoverState.object, false)
+                }
                 hoverState.object = null
             }
             if(sendHover){

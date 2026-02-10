@@ -131,6 +131,8 @@ class ModelViewerService(private val project: Project) {
     fun loadModel(json: String, resetCamera: Boolean = true) {
         println("loadModel called")
 
+        pageReady = true
+
         if (browser == null || !pageReady) {
             println("Viewer not ready -> queue")
             pendingJson = json
