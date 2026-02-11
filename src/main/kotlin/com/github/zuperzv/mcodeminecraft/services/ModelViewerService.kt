@@ -73,7 +73,8 @@ class ModelViewerService(private val project: Project) {
     private var selectedHighlighter: RangeHighlighter? = null
     private var selectedEditor: Editor? = null
     private var selectedIndex: Int? = null
-    private val selectionListeners = CopyOnWriteArrayList<(Int?) -> Unit>()
+    private var selectedIndices: List<Int> = emptyList()
+    private val selectionListeners = CopyOnWriteArrayList<(List<Int>) -> Unit>()
     private val scrollAlarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, project)
     @Volatile
     private var suppressAutoPreview = false
@@ -225,7 +226,11 @@ class ModelViewerService(private val project: Project) {
         return selectedIndex
     }
 
-    fun addSelectionListener(parentDisposable: Disposable, listener: (Int?) -> Unit) {
+    fun getSelectedIndices(): List<Int> {
+        return selectedIndices
+    }
+
+    fun addSelectionListener(parentDisposable: Disposable, listener: (List<Int>) -> Unit) {
         selectionListeners.add(listener)
         Disposer.register(parentDisposable) { selectionListeners.remove(listener) }
     }
@@ -356,7 +361,15 @@ class ModelViewerService(private val project: Project) {
             return
         }
         val value = index ?: -1
-        runViewerScript("window.setSelectedElement && window.setSelectedElement(${value});")
+        runViewerScript("window.setSelectedElements && window.setSelectedElements([${value}]);")
+    }
+
+    fun setSelectedElements(indices: List<Int>) {
+        if (browser == null || !pageReady) {
+            return
+        }
+        val payload = indices.joinToString(",")
+        runViewerScript("window.setSelectedElements && window.setSelectedElements([${payload}]);")
     }
 
     fun setElementHidden(index: Int, hidden: Boolean) {
@@ -460,15 +473,70 @@ class ModelViewerService(private val project: Project) {
     }
 
     private fun handleTransformUpdate(payload: String) {
-        val root = try {
-            JsonParser.parseString(payload).asJsonObject
+        val parsed = try {
+            JsonParser.parseString(payload)
         } catch (e: Exception) {
             logger.warn("Transform update parse failed: $payload", e)
             return
         }
-        val index = root.get("index")?.asInt ?: return
-        val fromValues = readVector(root, "from") ?: return
-        val toValues = readVector(root, "to") ?: return
+        val updates = when {
+            parsed.isJsonArray ->
+                parsed.asJsonArray.mapNotNull { elem ->
+                    elem.takeIf { it.isJsonObject }?.asJsonObject?.let { parseTransformUpdate(it) }
+                }
+            parsed.isJsonObject -> listOfNotNull(parseTransformUpdate(parsed.asJsonObject))
+            else -> emptyList()
+        }
+        if (updates.isEmpty()) {
+            return
+        }
+        val editor = resolveActiveEditorForUpdate() ?: return
+        ApplicationManager.getApplication().invokeLater {
+            if (editor.isDisposed) {
+                return@invokeLater
+            }
+            suppressAutoPreview = true
+            try {
+                WriteCommandAction.runWriteCommandAction(project) {
+                    val document = editor.document
+                    val text = document.text
+                    val ranges = findElementRanges(text)
+                    val replacements = updates.mapNotNull { update ->
+                        if (update.index < 0 || update.index >= ranges.size) {
+                            return@mapNotNull null
+                        }
+                        val range = ranges[update.index]
+                        val elementText = text.substring(range.first, range.last + 1)
+                        val updatedElement = applyTransformToElement(elementText, update)
+                        if (updatedElement == elementText) {
+                            return@mapNotNull null
+                        }
+                        Triple(range.first, range.last, updatedElement)
+                    }.sortedByDescending { it.first }
+                    if (replacements.isEmpty()) {
+                        return@runWriteCommandAction
+                    }
+                    replacements.forEach { (start, end, updatedElement) ->
+                        document.replaceString(start, end + 1, updatedElement)
+                    }
+                }
+            } finally {
+                suppressAutoPreview = false
+            }
+        }
+    }
+
+    private data class TransformUpdate(
+        val index: Int,
+        val fromValues: DoubleArray,
+        val toValues: DoubleArray,
+        val rotation: RotationUpdate?
+    )
+
+    private fun parseTransformUpdate(root: com.google.gson.JsonObject): TransformUpdate? {
+        val index = root.get("index")?.asInt ?: return null
+        val fromValues = readVector(root, "from") ?: return null
+        val toValues = readVector(root, "to") ?: return null
         val rotationObj = root.get("rotation")?.takeIf { it.isJsonObject }?.asJsonObject
         val rotation = rotationObj?.let { obj ->
             val origin = readVector(obj, "origin") ?: return@let null
@@ -485,34 +553,14 @@ class ModelViewerService(private val project: Project) {
                 else -> null
             }
         }
-        val editor = resolveActiveEditorForUpdate() ?: return
-        ApplicationManager.getApplication().invokeLater {
-            if (editor.isDisposed) {
-                return@invokeLater
-            }
-            suppressAutoPreview = true
-            try {
-                WriteCommandAction.runWriteCommandAction(project) {
-                    val document = editor.document
-                    val text = document.text
-                    val ranges = findElementRanges(text)
-                    if (index < 0 || index >= ranges.size) {
-                        return@runWriteCommandAction
-                    }
-                    val range = ranges[index]
-                    val elementText = text.substring(range.first, range.last + 1)
-                    var updatedElement = replaceArray(elementText, "from", fromValues)
-                    updatedElement = replaceArray(updatedElement, "to", toValues)
-                    updatedElement = updateRotationBlock(updatedElement, rotation)
-                    if (updatedElement == elementText) {
-                        return@runWriteCommandAction
-                    }
-                    document.replaceString(range.first, range.last + 1, updatedElement)
-                }
-            } finally {
-                suppressAutoPreview = false
-            }
-        }
+        return TransformUpdate(index, fromValues, toValues, rotation)
+    }
+
+    private fun applyTransformToElement(text: String, update: TransformUpdate): String {
+        var updatedElement = replaceArray(text, "from", update.fromValues)
+        updatedElement = replaceArray(updatedElement, "to", update.toValues)
+        updatedElement = updateRotationBlock(updatedElement, update.rotation)
+        return updatedElement
     }
 
     private data class RotationUpdate(
@@ -636,27 +684,46 @@ class ModelViewerService(private val project: Project) {
         val trimmed = request.trim()
         if (trimmed.isEmpty() || trimmed == "null" || trimmed == "undefined") {
             selectedIndex = null
+            selectedIndices = emptyList()
             clearSelectedHighlight()
+            notifySelectionListeners()
+            return
+        }
+        if (trimmed.startsWith("[")) {
+            val array = runCatching { JsonParser.parseString(trimmed) }.getOrNull()
+            if (array == null || !array.isJsonArray) {
+                return
+            }
+            val indices = array.asJsonArray
+                .mapNotNull { it.takeIf { elem -> elem.isJsonPrimitive && elem.asJsonPrimitive.isNumber }?.asInt }
+                .filter { it >= 0 }
+            selectedIndices = indices
+            selectedIndex = indices.firstOrNull()
+            if (selectedIndex == null) {
+                clearSelectedHighlight()
+            } else {
+                applySelectedHighlight()
+            }
             notifySelectionListeners()
             return
         }
         val index = trimmed.toIntOrNull()
         if (index == null || index < 0) {
             selectedIndex = null
+            selectedIndices = emptyList()
             clearSelectedHighlight()
             notifySelectionListeners()
             return
         }
         selectedIndex = index
+        selectedIndices = listOf(index)
         applySelectedHighlight()
         notifySelectionListeners()
     }
 
     private fun notifySelectionListeners() {
-        val value = selectedIndex
-        selectionListeners.forEach { listener ->
-            listener(value)
-        }
+        val value = selectedIndices.toList()
+        selectionListeners.forEach { listener -> listener(value) }
     }
 
     private fun readVector(root: com.google.gson.JsonObject, name: String): DoubleArray? {

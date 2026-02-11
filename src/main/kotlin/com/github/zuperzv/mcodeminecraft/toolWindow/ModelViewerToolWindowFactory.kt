@@ -3,8 +3,12 @@ package com.github.zuperzv.mcodeminecraft.toolWindow
 import com.github.zuperzv.mcodeminecraft.preview.ModelAutoPreviewService
 import com.github.zuperzv.mcodeminecraft.services.AssetServer
 import com.github.zuperzv.mcodeminecraft.services.ModelViewerService
+import com.github.zuperzv.mcodeminecraft.util.AssetRootResolver
+import com.google.gson.GsonBuilder
+import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.google.gson.JsonPrimitive
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnActionEvent
@@ -21,6 +25,7 @@ import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
 import com.intellij.ui.JBColor
@@ -38,7 +43,9 @@ import java.awt.event.FocusEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.awt.geom.RoundRectangle2D
+import java.awt.image.BufferedImage
 import java.io.File
+import javax.imageio.ImageIO
 import javax.swing.*
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
@@ -49,6 +56,9 @@ import javax.swing.tree.DefaultTreeModel
 import javax.swing.tree.TreeCellRenderer
 import javax.swing.tree.TreePath
 import javax.swing.tree.TreeSelectionModel
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
 
@@ -70,32 +80,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             JBColor(0x26282b, 0x26282b)
         )
 
-    val TAB_TEXT_COLOR: Color =
-        JBColor.namedColor(
-            "TabbedPane.foreground",
-            JBColor(0xd6d6d6, 0xd6d6d6)
-        )
-
-    val TAB_TEXT_SELECTED_COLOR: Color =
-        JBColor.namedColor(
-            "TabbedPane.selectedForeground",
-            JBColor(0xffffff, 0xffffff)
-        )
-
-    val TAB_BG_COLOR: Color =
-        JBColor.namedColor(
-            "TabbedPane.unselectedBackground",
-            JBColor(0x2f3136, 0x2f3136)
-        )
-
-    val TAB_BG_SELECTED_COLOR: Color =
-        JBColor.namedColor(
-            "TabbedPane.selectedBackground",
-            JBColor(0x3b3f46, 0x3b3f46)
-        )
-
-    val TEST_COLOR: Color =
-        JBColor(0x0066ff, 0x0066ff)
+    private val TEXTURE_PREVIEW_SIZE = 32
 
     private val logger = Logger.getInstance(ModelViewerToolWindowFactory::class.java)
 
@@ -142,7 +127,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             }
         }
         viewerContainer.isOpaque = false
-        viewerContainer.border = JBUI.Borders.empty(20 + 1, 20 + 1, 20 + 1, 20 + 1)
+        viewerContainer.border = JBUI.Borders.empty(20 + 1, 20 + 1, 20 + 14, 20 + 1)
 
         val transformToolbar = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(2), JBUI.scale(4)))
         transformToolbar.border = JBUI.Borders.empty(6, 6, 0, 6)
@@ -609,6 +594,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         const viewModeDefaults = new WeakMap()
         const hoverState = { object: null }
         const selectedState = { objects: new Set(), outlines: new Map(), active: null }
+        let suppressSelectionNotify = false
         let transformControls = null
         let transformMode = "translate"
         let transformSpace = "local"
@@ -619,6 +605,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         const useAxisRotation = ROTATION_FORMAT === "axis"
         let lastRotationAxis = "y"
         let wasTransforming = false
+        let multiTransformState = null
         let sourceModel = null
         let sourceElements = null
         let hoverDebugLogged = false
@@ -651,9 +638,16 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 isTransforming = event.value
                 if(event.value){
                     wasTransforming = true
+                    beginMultiTransform()
                 }else if(wasTransforming){
                     commitTransformUpdate()
+                    multiTransformState = null
                     wasTransforming = false
+                }
+            })
+            transformControls.addEventListener("change", ()=>{
+                if(isTransforming){
+                    applyMultiTransformDelta()
                 }
             })
             scene.add(transformControls)
@@ -1139,10 +1133,88 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             }
         }
 
+        function resolveTransformTarget(mesh){
+            if(!mesh) return null
+            const root = mesh.userData?.root
+            const pivot = mesh.userData?.pivot
+            if(transformMode === "rotate" && pivot){
+                return pivot
+            }
+            if(transformMode !== "rotate" && root){
+                return root
+            }
+            return mesh
+        }
+
+        function beginMultiTransform(){
+            const meshes = Array.from(selectedState.objects)
+            if(meshes.length <= 1){
+                multiTransformState = null
+                return
+            }
+            const activeTarget = resolveTransformTarget(selectedState.active)
+            if(!activeTarget){
+                multiTransformState = null
+                return
+            }
+            activeTarget.updateMatrixWorld(true)
+            const entries = meshes
+                .map(mesh=>{
+                    const target = resolveTransformTarget(mesh)
+                    if(!target) return null
+                    target.updateMatrixWorld(true)
+                    return { target: target, matrix: target.matrixWorld.clone() }
+                })
+                .filter(entry=>entry !== null)
+            if(entries.length <= 1){
+                multiTransformState = null
+                return
+            }
+            multiTransformState = {
+                active: activeTarget,
+                activeMatrix: activeTarget.matrixWorld.clone(),
+                entries: entries
+            }
+        }
+
+        function applyMultiTransformDelta(){
+            if(!multiTransformState){
+                return
+            }
+            const active = multiTransformState.active
+            const baseMatrix = multiTransformState.activeMatrix
+            if(!active || !baseMatrix){
+                return
+            }
+            const currentMatrix = active.matrixWorld.clone()
+            const inverseBase = baseMatrix.clone().invert()
+            const delta = new THREE.Matrix4().multiplyMatrices(currentMatrix, inverseBase)
+            multiTransformState.entries.forEach(entry=>{
+                if(!entry || entry.target === active) return
+                const nextMatrix = new THREE.Matrix4().multiplyMatrices(delta, entry.matrix)
+                const pos = new THREE.Vector3()
+                const quat = new THREE.Quaternion()
+                const scale = new THREE.Vector3()
+                nextMatrix.decompose(pos, quat, scale)
+                entry.target.position.copy(pos)
+                entry.target.quaternion.copy(quat)
+                entry.target.scale.copy(scale)
+                entry.target.updateMatrixWorld(true)
+            })
+        }
+
         function notifySelectionChanged(){
-            if(!sendSelectionUpdate) return
-            const idx = selectedState.active?.userData?.elementIndex
-            sendSelectionUpdate(String(Number.isInteger(idx) ? idx : -1))
+            if(!sendSelectionUpdate || suppressSelectionNotify) return
+            const indices = Array.from(selectedState.objects)
+                .map(obj=>obj?.userData?.elementIndex)
+                .filter(idx=>Number.isInteger(idx))
+            const activeIdx = selectedState.active?.userData?.elementIndex
+            if(Number.isInteger(activeIdx)){
+                const filtered = indices.filter(idx=>idx !== activeIdx)
+                indices.length = 0
+                indices.push(activeIdx, ...filtered)
+            }
+            sendSelectionUpdate(JSON.stringify(indices))
         }
 
         function isSelected(mesh){
@@ -1262,22 +1334,21 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             return fallback || "y"
         }
 
-        function commitTransformUpdate(){
-            const mesh = selectedState.active
+        function commitTransformForMesh(mesh){
             if(!mesh || !sourceElements){
-                return
+                return null
             }
             const index = mesh.userData?.elementIndex
             if(index === undefined || index === null){
-                return
+                return null
             }
             const element = sourceElements[index]
             if(!element){
-                return
+                return null
             }
             const baseSize = mesh.userData?.baseSize
             if(!baseSize){
-                return
+                return null
             }
             const oldCenter = new THREE.Vector3(
                 (element.from?.[0] ?? 0) + ((element.to?.[0] ?? 0) - (element.from?.[0] ?? 0)) / 2,
@@ -1390,8 +1461,19 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             }else if(element.rotation){
                 delete element.rotation
             }
-            if(sendTransformUpdate){
-                sendTransformUpdate(JSON.stringify(payload))
+            return payload
+        }
+
+        function commitTransformUpdate(){
+            const meshes = Array.from(selectedState.objects)
+            if(meshes.length === 0){
+                return
+            }
+            const payloads = meshes
+                .map(mesh=>commitTransformForMesh(mesh))
+                .filter(payload=>payload)
+            if(sendTransformUpdate && payloads.length){
+                sendTransformUpdate(JSON.stringify(payloads))
             }
         }
 
@@ -1732,18 +1814,28 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             }
         }
 
+        window.setSelectedElements = function(indices){
+            suppressSelectionNotify = true
+            clearSelection()
+            if(Array.isArray(indices)){
+                indices.forEach(index=>{
+                    if(!Number.isInteger(index) || index < 0) return
+                    const target = pickableMeshes.find(mesh=>mesh?.userData?.elementIndex === index)
+                    if(target){
+                        addSelection(target)
+                    }
+                })
+            }
+            suppressSelectionNotify = false
+            notifySelectionChanged()
+        }
+
         window.setSelectedElement = function(index){
             if(!Number.isInteger(index) || index < 0){
-                clearSelection()
+                window.setSelectedElements([])
                 return
             }
-            const target = pickableMeshes.find(mesh=>mesh?.userData?.elementIndex === index)
-            if(!target){
-                clearSelection()
-                return
-            }
-            clearSelection()
-            addSelection(target)
+            window.setSelectedElements([index])
         }
 
         window.setElementHidden = function(index, hidden){
@@ -1945,14 +2037,22 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         </html>
     """.trimIndent()
 
-    private data class TextureEntry(val key: String, val value: String)
+    private data class TextureEntry(
+        val key: String,
+        val value: String,
+        val resolvedValue: String,
+        val displayName: String,
+        val previewIcon: Icon?,
+        val isAnimated: Boolean
+    )
 
     private enum class ElementNodeKind { ROOT, GROUP, ELEMENT }
 
     private data class ElementTreeItem(
         val kind: ElementNodeKind,
         val name: String,
-        val index: Int? = null
+        val index: Int? = null,
+        val groupPath: List<Int>? = null
     )
 
     private data class HeaderAction(val icon: Icon, val tooltip: String, val handler: (JButton) -> Unit)
@@ -1961,8 +2061,12 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         val panel: JComponent,
         val model: DefaultListModel<TextureEntry>,
         val searchField: SearchTextField,
-        val allEntries: MutableList<TextureEntry>
-    )
+        val allEntries: MutableList<TextureEntry>,
+        val previewCache: MutableMap<String, Icon?>,
+        val animationCache: MutableMap<String, Boolean>
+    ) {
+        var lastModelPath: String? = null
+    }
 
     private class ElementsPanelState(
         val panel: JComponent,
@@ -1976,8 +2080,6 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         var totalElements = 0
         var lastModelPath: String? = null
     }
-
-    private val TAB_LABEL_KEY = "tabLabel"
 
     private fun createControlsPanel(project: Project, viewerService: ModelViewerService): JComponent {
         val tabbedPane = createDraggableTabbedPane().apply {
@@ -1993,19 +2095,16 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         texturesState = createTexturesPanel(refresh)
         elementsState = createElementsPanel(project, viewerService, refresh)
 
-        addClosableTab(
-            tabbedPane,
+        tabbedPane.addTab(
             "Textures",
             AllIcons.FileTypes.Image,
             texturesState.panel
         )
-        addClosableTab(
-            tabbedPane,
+        tabbedPane.addTab(
             "Elements",
             AllIcons.Nodes.Folder,
             elementsState.panel
         )
-        registerTabStyleUpdater(tabbedPane)
 
         refresh()
 
@@ -2031,16 +2130,16 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             }
         )
 
-        viewerService.addSelectionListener(project) { index ->
+        viewerService.addSelectionListener(project) { indices ->
             SwingUtilities.invokeLater {
-                updateSelectionFromViewer(index, elementsState)
+                updateSelectionFromViewer(indices, elementsState)
             }
         }
 
         return JPanel(BorderLayout()).apply {
             isOpaque = true
             background = BACKGROUND_COLOR
-            border = JBUI.Borders.empty(8)
+            border = JBUI.Borders.empty()
             add(tabbedPane, BorderLayout.CENTER)
         }
     }
@@ -2048,6 +2147,8 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
     private fun createTexturesPanel(onRefresh: () -> Unit): TexturesPanelState {
         val model = DefaultListModel<TextureEntry>()
         val allEntries = mutableListOf<TextureEntry>()
+        val previewCache = mutableMapOf<String, Icon?>()
+        val animationCache = mutableMapOf<String, Boolean>()
 
         val searchField = SearchTextField().apply {
             isVisible = false
@@ -2096,7 +2197,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             add(JBScrollPane(list).apply { border = JBUI.Borders.emptyTop(6) }, BorderLayout.CENTER)
         }
 
-        return TexturesPanelState(panel, model, searchField, allEntries)
+        return TexturesPanelState(panel, model, searchField, allEntries, previewCache, animationCache)
     }
 
     private fun createElementsPanel(
@@ -2110,7 +2211,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             isRootVisible = false
             showsRootHandles = true
             background = BACKGROUND_COLOR
-            selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
+            selectionModel.selectionMode = TreeSelectionModel.DISCONTIGUOUS_TREE_SELECTION
         }
         val elementNodes = mutableMapOf<Int, DefaultMutableTreeNode>()
         val hiddenElements = mutableSetOf<Int>()
@@ -2139,15 +2240,21 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             if (state.suppressSelectionSync) {
                 return@addTreeSelectionListener
             }
-            val node = tree.lastSelectedPathComponent as? DefaultMutableTreeNode
-            val item = node?.userObject as? ElementTreeItem
-            if (item?.kind == ElementNodeKind.ELEMENT) {
-                viewerService.setSelectedElement(item.index)
-                updateElementCountLabel(state, selectedCount = 1)
+            val indices = tree.selectionPaths
+                ?.mapNotNull { path ->
+                    val node = path.lastPathComponent as? DefaultMutableTreeNode
+                    val item = node?.userObject as? ElementTreeItem
+                    item?.takeIf { it.kind == ElementNodeKind.ELEMENT }?.index
+                }
+                ?.distinct()
+                ?.filterNotNull()
+                ?: emptyList()
+            if (indices.isNotEmpty()) {
+                viewerService.setSelectedElements(indices)
             } else {
                 viewerService.setSelectedElement(null)
-                updateElementCountLabel(state, selectedCount = 0)
             }
+            updateElementCountLabel(state, selectedCount = indices.size)
         }
         tree.addMouseListener(object : MouseAdapter() {
             override fun mousePressed(e: MouseEvent) {
@@ -2156,6 +2263,10 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 val path = tree.getPathForRow(row) ?: return
                 val node = path.lastPathComponent as? DefaultMutableTreeNode ?: return
                 val item = node.userObject as? ElementTreeItem ?: return
+                if (SwingUtilities.isRightMouseButton(e) && item.kind == ElementNodeKind.GROUP) {
+                    showGroupContextMenu(project, viewerService, state, item, e.component, e.x, e.y)
+                    return
+                }
                 if (item.kind != ElementNodeKind.ELEMENT || item.index == null) return
                 val iconSize = JBUI.scale(16)
                 val padding = JBUI.scale(10)
@@ -2280,7 +2391,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             return
         }
         val root = parseRootObject(jsonText) ?: return
-        updateTexturesFromJson(root, texturesState)
+        updateTexturesFromJson(root, texturesState, viewerService)
         updateElementsFromJson(root, elementsState, viewerService)
     }
 
@@ -2293,6 +2404,9 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
     private fun clearTextures(state: TexturesPanelState) {
         state.allEntries.clear()
         state.model.clear()
+        state.previewCache.clear()
+        state.animationCache.clear()
+        state.lastModelPath = null
     }
 
     private fun clearElements(state: ElementsPanelState) {
@@ -2304,16 +2418,45 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         updateElementCountLabel(state, selectedCount = 0)
     }
 
-    private fun updateTexturesFromJson(root: JsonObject, state: TexturesPanelState) {
+    private fun updateTexturesFromJson(
+        root: JsonObject,
+        state: TexturesPanelState,
+        viewerService: ModelViewerService
+    ) {
         state.allEntries.clear()
+        val activeFile = viewerService.getActiveModelFile()
+        val activePath = activeFile?.path
+        if (activePath != state.lastModelPath) {
+            state.previewCache.clear()
+            state.animationCache.clear()
+            state.lastModelPath = activePath
+        }
+        val assetsRoot = activeFile?.let { AssetRootResolver.findAssetsRoot(it) }
+        val defaultNamespace = resolveNamespaceFromModel(activeFile, assetsRoot)
+
         val textures = root.getAsJsonObject("textures")
+        val textureMap = buildTextureMap(textures)
         textures?.entrySet()?.forEach { entry ->
-            val value = if (entry.value.isJsonPrimitive) {
+            val rawValue = if (entry.value.isJsonPrimitive) {
                 entry.value.asString
             } else {
                 entry.value.toString()
             }
-            state.allEntries.add(TextureEntry(entry.key, value))
+            val resolvedValue = resolveTextureValue(rawValue, textureMap)
+            val displayName = extractTextureFileName(resolvedValue.removePrefix("#"))
+            val textureFile = resolveTextureFile(assetsRoot, defaultNamespace, resolvedValue)
+            val previewIcon = loadTexturePreviewIcon(state, textureFile)
+            val isAnimated = textureFile?.let { isTextureAnimated(state, it) } ?: false
+            state.allEntries.add(
+                TextureEntry(
+                    key = entry.key,
+                    value = rawValue,
+                    resolvedValue = resolvedValue,
+                    displayName = displayName,
+                    previewIcon = previewIcon,
+                    isAnimated = isAnimated
+                )
+            )
         }
         updateTextureModel(state.model, state.allEntries, state.searchField.text)
     }
@@ -2330,10 +2473,133 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         } else {
             entries.filter {
                 it.key.contains(trimmed, ignoreCase = true) ||
-                    it.value.contains(trimmed, ignoreCase = true)
+                    it.value.contains(trimmed, ignoreCase = true) ||
+                    it.resolvedValue.contains(trimmed, ignoreCase = true) ||
+                    it.displayName.contains(trimmed, ignoreCase = true)
             }
         }
         filtered.forEach { model.addElement(it) }
+    }
+
+    private fun extractTextureFileName(value: String): String {
+        var name = value
+        val slashIndex = name.lastIndexOf('/')
+        if (slashIndex >= 0 && slashIndex + 1 < name.length) {
+            name = name.substring(slashIndex + 1)
+        }
+        val colonIndex = name.lastIndexOf(':')
+        if (colonIndex >= 0 && colonIndex + 1 < name.length) {
+            name = name.substring(colonIndex + 1)
+        }
+        if (!name.contains('.')) {
+            name += ".png"
+        }
+        return name
+    }
+
+    private fun buildTextureMap(textures: JsonObject?): Map<String, String> {
+        if (textures == null) return emptyMap()
+        val result = mutableMapOf<String, String>()
+        textures.entrySet().forEach { entry ->
+            if (entry.value.isJsonPrimitive) {
+                result[entry.key] = entry.value.asString
+            }
+        }
+        return result
+    }
+
+    private fun resolveTextureValue(
+        rawValue: String,
+        textureMap: Map<String, String>,
+        depth: Int = 0
+    ): String {
+        if (depth > 10) return rawValue
+        if (!rawValue.startsWith("#")) return rawValue
+        val key = rawValue.substring(1)
+        val next = textureMap[key] ?: return rawValue
+        return resolveTextureValue(next, textureMap, depth + 1)
+    }
+
+    private fun resolveNamespaceFromModel(file: VirtualFile?, assetsRoot: File?): String? {
+        if (file == null || assetsRoot == null) return null
+        val assetsPath = assetsRoot.toPath().toAbsolutePath().normalize()
+        val filePath = File(file.path).toPath().toAbsolutePath().normalize()
+        if (!filePath.startsWith(assetsPath)) return null
+        val relative = assetsPath.relativize(filePath).toString().replace("\\", "/")
+        return relative.substringBefore("/").ifBlank { null }
+    }
+
+    private fun resolveTextureFile(
+        assetsRoot: File?,
+        defaultNamespace: String?,
+        resolvedValue: String
+    ): File? {
+        if (assetsRoot == null) return null
+        var value = resolvedValue.trim()
+        if (value.startsWith("#")) return null
+        val namespace: String
+        var path = value
+        if (value.contains(":")) {
+            val parts = value.split(":", limit = 2)
+            namespace = parts[0]
+            path = parts[1]
+        } else {
+            namespace = defaultNamespace ?: "minecraft"
+        }
+        path = normalizeTexturePath(path)
+        return File(assetsRoot, "$namespace/textures/$path")
+    }
+
+    private fun normalizeTexturePath(path: String): String {
+        var cleaned = path.replace("\\", "/").removePrefix("/")
+        if (cleaned.startsWith("textures/")) {
+            cleaned = cleaned.removePrefix("textures/")
+        }
+        if (!cleaned.endsWith(".png")) {
+            cleaned += ".png"
+        }
+        return cleaned
+    }
+
+    private fun loadTexturePreviewIcon(state: TexturesPanelState, file: File?): Icon? {
+        if (file == null || !file.isFile) return null
+        val key = file.path
+        if (state.previewCache.containsKey(key)) {
+            return state.previewCache[key]
+        }
+        val image = runCatching { ImageIO.read(file) }.getOrNull()
+        val icon = image?.let { ImageIcon(scaleTexturePreview(it, JBUI.scale(TEXTURE_PREVIEW_SIZE))) }
+        state.previewCache[key] = icon
+        return icon
+    }
+
+    private fun isTextureAnimated(state: TexturesPanelState, file: File): Boolean {
+        val key = file.path
+        if (state.animationCache.containsKey(key)) {
+            return state.animationCache[key] == true
+        }
+        val animated = File(file.path + ".mcmeta").isFile
+        state.animationCache[key] = animated
+        return animated
+    }
+
+    private fun scaleTexturePreview(image: BufferedImage, size: Int): BufferedImage {
+        val ratio = min(size.toDouble() / image.width, size.toDouble() / image.height)
+        val targetW = max(1, (image.width * ratio).roundToInt())
+        val targetH = max(1, (image.height * ratio).roundToInt())
+        val canvas = BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB)
+        val g2 = canvas.createGraphics()
+        try {
+            g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR)
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF)
+            g2.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_SPEED)
+            val x = (size - targetW) / 2
+            val y = (size - targetH) / 2
+            g2.drawImage(image, x, y, targetW, targetH, null)
+        } finally {
+            g2.dispose()
+        }
+        return canvas
     }
 
     private fun updateElementsFromJson(
@@ -2366,10 +2632,10 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         val groups = root.getAsJsonArray("groups")
 
         if (groups != null) {
-            groups.forEach { entry ->
+            groups.forEachIndexed { index, entry ->
                 when {
                     entry.isJsonObject -> {
-                        val groupNode = parseGroupNode(entry.asJsonObject, elementNames, used, state)
+                        val groupNode = parseGroupNode(entry.asJsonObject, elementNames, used, state, listOf(index))
                         rootNode.add(groupNode)
                     }
                     entry.isJsonPrimitive && entry.asJsonPrimitive.isNumber -> {
@@ -2400,8 +2666,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
 
         state.model.setRoot(rootNode)
         state.model.reload()
-        expandAll(state.tree)
-        updateSelectionFromViewer(viewerService.getSelectedIndex(), state)
+        updateSelectionFromViewer(viewerService.getSelectedIndices(), state)
 
         for (index in 0 until totalElements) {
             viewerService.setElementHidden(index, state.hiddenElements.contains(index))
@@ -2412,15 +2677,18 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         obj: JsonObject,
         elementNames: Map<Int, String>,
         used: MutableSet<Int>,
-        state: ElementsPanelState
+        state: ElementsPanelState,
+        path: List<Int>
     ): DefaultMutableTreeNode {
         val name = obj.get("name")?.asString ?: ""
-        val groupNode = DefaultMutableTreeNode(ElementTreeItem(ElementNodeKind.GROUP, name))
+        val groupNode = DefaultMutableTreeNode(ElementTreeItem(ElementNodeKind.GROUP, name, groupPath = path))
         val children = obj.getAsJsonArray("children")
-        children?.forEach { child ->
+        children?.forEachIndexed { idx, child ->
             when {
                 child.isJsonObject -> {
-                    groupNode.add(parseGroupNode(child.asJsonObject, elementNames, used, state))
+                    groupNode.add(
+                        parseGroupNode(child.asJsonObject, elementNames, used, state, path + idx)
+                    )
                 }
                 child.isJsonPrimitive && child.asJsonPrimitive.isNumber -> {
                     val index = child.asInt
@@ -2449,25 +2717,17 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         return node
     }
 
-    private fun expandAll(tree: Tree) {
-        var row = 0
-        while (row < tree.rowCount) {
-            tree.expandRow(row)
-            row++
-        }
-    }
-
-    private fun updateSelectionFromViewer(index: Int?, state: ElementsPanelState) {
+    private fun updateSelectionFromViewer(indices: List<Int>, state: ElementsPanelState) {
         state.suppressSelectionSync = true
         try {
-            val path = index?.let { state.elementNodes[it] }?.let { TreePath(it.path) }
-            state.tree.selectionPath = path
-            if (path != null) {
-                state.tree.scrollPathToVisible(path)
-                updateElementCountLabel(state, selectedCount = 1)
-            } else {
-                updateElementCountLabel(state, selectedCount = 0)
+            val paths = indices.mapNotNull { index ->
+                state.elementNodes[index]?.let { TreePath(it.path) }
             }
+            state.tree.selectionPaths = if (paths.isEmpty()) null else paths.toTypedArray()
+            if (paths.isNotEmpty()) {
+                state.tree.scrollPathToVisible(paths.first())
+            }
+            updateElementCountLabel(state, selectedCount = paths.size)
         } finally {
             state.suppressSelectionSync = false
         }
@@ -2476,6 +2736,167 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
     private fun updateElementCountLabel(state: ElementsPanelState, selectedCount: Int) {
         val total = state.totalElements
         state.countLabel.text = "${selectedCount} / ${total}"
+    }
+
+    private fun showGroupContextMenu(
+        project: Project,
+        viewerService: ModelViewerService,
+        state: ElementsPanelState,
+        item: ElementTreeItem,
+        component: Component,
+        x: Int,
+        y: Int
+    ) {
+        val groupPath = item.groupPath ?: return
+        val menu = JPopupMenu()
+        val renameItem = JMenuItem("Rename group")
+        renameItem.addActionListener {
+            renameGroup(project, viewerService, groupPath)
+        }
+        val assignItem = JMenuItem("Assign selected elements")
+        assignItem.addActionListener {
+            val selected = collectSelectedElementIndices(state.tree)
+                .ifEmpty { viewerService.getSelectedIndices() }
+            if (selected.isEmpty()) {
+                Messages.showInfoMessage(project, "No selected elements.", "Assign Elements")
+                return@addActionListener
+            }
+            assignSelectedElementsToGroup(project, viewerService, groupPath, selected)
+        }
+        menu.add(renameItem)
+        menu.add(assignItem)
+        menu.show(component, x, y)
+    }
+
+    private fun collectSelectedElementIndices(tree: Tree): List<Int> {
+        return tree.selectionPaths
+            ?.mapNotNull { path ->
+                val node = path.lastPathComponent as? DefaultMutableTreeNode
+                val item = node?.userObject as? ElementTreeItem
+                item?.takeIf { it.kind == ElementNodeKind.ELEMENT }?.index
+            }
+            ?.distinct()
+            ?: emptyList()
+    }
+
+    private fun renameGroup(project: Project, viewerService: ModelViewerService, groupPath: List<Int>) {
+        updateJsonDocument(project, viewerService, "Rename Group") { root ->
+            val groups = ensureGroupsArray(root)
+            val groupObj = findGroupByPath(groups, groupPath) ?: return@updateJsonDocument false
+            val currentName = groupObj.get("name")?.asString ?: ""
+            val next = Messages.showInputDialog(
+                project,
+                "Group name",
+                "Rename Group",
+                null,
+                currentName,
+                null
+            ) ?: return@updateJsonDocument false
+            groupObj.addProperty("name", next)
+            true
+        }
+    }
+
+    private fun assignSelectedElementsToGroup(
+        project: Project,
+        viewerService: ModelViewerService,
+        groupPath: List<Int>,
+        selected: List<Int>
+    ) {
+        val indices = selected.filter { it >= 0 }
+        if (indices.isEmpty()) return
+        updateJsonDocument(project, viewerService, "Assign Elements") { root ->
+            val groups = ensureGroupsArray(root)
+            val groupObj = findGroupByPath(groups, groupPath) ?: return@updateJsonDocument false
+            val indexSet = indices.toSet()
+            removeIndicesFromArray(groups, indexSet)
+            val children = groupObj.getAsJsonArray("children") ?: JsonArray().also {
+                groupObj.add("children", it)
+            }
+            indices.forEach { idx ->
+                val exists = children.any { it.isJsonPrimitive && it.asJsonPrimitive.isNumber && it.asInt == idx }
+                if (!exists) {
+                    children.add(JsonPrimitive(idx))
+                }
+            }
+            true
+        }
+    }
+
+    private fun updateJsonDocument(
+        project: Project,
+        viewerService: ModelViewerService,
+        title: String,
+        mutator: (JsonObject) -> Boolean
+    ) {
+        val activeFile = viewerService.getActiveModelFile()
+        if (activeFile?.extension != "json") {
+            Messages.showInfoMessage(project, "No active JSON document.", title)
+            return
+        }
+        val document = viewerService.getActiveModelEditor()?.document
+            ?: com.intellij.openapi.fileEditor.FileDocumentManager.getInstance().getDocument(activeFile)
+            ?: run {
+                Messages.showInfoMessage(project, "No active JSON document.", title)
+                return
+            }
+        val root = parseRootObject(document.text) ?: run {
+            Messages.showInfoMessage(project, "Unable to parse JSON.", title)
+            return
+        }
+        val changed = mutator(root)
+        if (!changed) return
+        val gson = GsonBuilder().setPrettyPrinting().create()
+        val updated = gson.toJson(root)
+        com.intellij.openapi.command.WriteCommandAction.runWriteCommandAction(project) {
+            document.setText(updated)
+        }
+    }
+
+    private fun ensureGroupsArray(root: JsonObject): JsonArray {
+        val existing = root.getAsJsonArray("groups")
+        if (existing != null) return existing
+        val created = JsonArray()
+        root.add("groups", created)
+        return created
+    }
+
+    private fun findGroupByPath(groups: JsonArray, path: List<Int>): JsonObject? {
+        var currentArray = groups
+        var currentObject: JsonObject? = null
+        path.forEachIndexed { idx, value ->
+            if (value < 0 || value >= currentArray.size()) {
+                return null
+            }
+            val element = currentArray[value]
+            if (!element.isJsonObject) {
+                return null
+            }
+            currentObject = element.asJsonObject
+            if (idx < path.lastIndex) {
+                currentArray = currentObject?.getAsJsonArray("children") ?: return null
+            }
+        }
+        return currentObject
+    }
+
+    private fun removeIndicesFromArray(array: JsonArray, indices: Set<Int>) {
+        for (i in array.size() - 1 downTo 0) {
+            val element = array[i]
+            when {
+                element.isJsonPrimitive && element.asJsonPrimitive.isNumber -> {
+                    if (indices.contains(element.asInt)) {
+                        array.remove(i)
+                    }
+                }
+                element.isJsonObject -> {
+                    val children = element.asJsonObject.getAsJsonArray("children")
+                    if (children != null) {
+                        removeIndicesFromArray(children, indices)
+                    }
+                }
+            }
+        }
     }
 
     private fun addEmptyGroup(
@@ -2639,25 +3060,11 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         return text.substring(lineStart, i)
     }
 
-    private fun registerTabStyleUpdater(tabbedPane: JTabbedPane) {
-        tabbedPane.addChangeListener { updateTabHeaderStyles(tabbedPane) }
-        updateTabHeaderStyles(tabbedPane)
-    }
-
-    private fun updateTabHeaderStyles(tabbedPane: JTabbedPane) {
-        for (i in 0 until tabbedPane.tabCount) {
-            val tabComponent = tabbedPane.getTabComponentAt(i) as? JComponent ?: continue
-            val label = tabComponent.getClientProperty(TAB_LABEL_KEY) as? JBLabel ?: continue
-            val selected = i == tabbedPane.selectedIndex
-            label.foreground = if (selected) TAB_TEXT_SELECTED_COLOR else TAB_TEXT_COLOR
-            tabComponent.background = if (selected) TAB_BG_SELECTED_COLOR else TAB_BG_COLOR
-        }
-    }
-
     private fun createDraggableTabbedPane(): JTabbedPane {
-        val tabbedPane = JTabbedPane()
+        val tabbedPane = JBTabbedPane()
+        tabbedPane.tabPlacement = JTabbedPane.TOP
         tabbedPane.tabLayoutPolicy = JTabbedPane.SCROLL_TAB_LAYOUT
-        tabbedPane.isOpaque = false
+        tabbedPane.isOpaque = true
         var dragIndex = -1
         tabbedPane.addMouseListener(object : MouseAdapter() {
             override fun mousePressed(e: MouseEvent) {
@@ -2683,52 +3090,6 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         return tabbedPane
     }
 
-    private fun addClosableTab(
-        tabbedPane: JTabbedPane,
-        title: String,
-        icon: Icon,
-        content: JComponent
-    ) {
-        tabbedPane.addTab(title, icon, content)
-        val index = tabbedPane.indexOfComponent(content)
-        tabbedPane.setTabComponentAt(index, createClosableTabComponent(tabbedPane, title, icon))
-        updateTabHeaderStyles(tabbedPane)
-    }
-
-    private fun createClosableTabComponent(
-        tabbedPane: JTabbedPane,
-        title: String,
-        icon: Icon
-    ): JComponent {
-        val label = JBLabel(title, icon, SwingConstants.LEFT).apply {
-            foreground = TAB_TEXT_COLOR
-            font = font.deriveFont(Font.BOLD)
-        }
-        val closeButton = JButton(AllIcons.Actions.Close).apply {
-            isOpaque = false
-            border = JBUI.Borders.empty()
-            isContentAreaFilled = false
-            isFocusable = false
-            preferredSize = JBUI.size(16, 16)
-        }
-        val panel = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(4), 0)).apply {
-            isOpaque = true
-            background = TAB_BG_COLOR
-            border = JBUI.Borders.empty(4, 8, 4, 6)
-            add(label)
-            add(closeButton)
-        }
-        panel.putClientProperty(TAB_LABEL_KEY, label)
-        closeButton.addActionListener {
-            val index = tabbedPane.indexOfTabComponent(panel)
-            if (index != -1) {
-                tabbedPane.removeTabAt(index)
-                updateTabHeaderStyles(tabbedPane)
-            }
-        }
-        return panel
-    }
-
     private fun moveTab(tabbedPane: JTabbedPane, fromIndex: Int, toIndex: Int) {
         if (fromIndex == toIndex) return
         val component = tabbedPane.getComponentAt(fromIndex)
@@ -2745,10 +3106,71 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             tabbedPane.setTabComponentAt(toIndex, tabComponent)
         }
         tabbedPane.selectedIndex = toIndex
-        updateTabHeaderStyles(tabbedPane)
     }
 
-    private class TextureListRenderer : ListCellRenderer<TextureEntry> {
+    private class TexturePreviewLayer(size: Int) : JLayeredPane() {
+        private val previewLabel = JBLabel()
+        private val animationLabel = JBLabel(AllIcons.Actions.Refresh)
+        private val previewSize = size
+
+        init {
+            isOpaque = false
+            preferredSize = JBUI.size(previewSize, previewSize)
+            minimumSize = JBUI.size(previewSize, previewSize)
+            maximumSize = JBUI.size(previewSize, previewSize)
+            previewLabel.horizontalAlignment = SwingConstants.CENTER
+            previewLabel.verticalAlignment = SwingConstants.CENTER
+            animationLabel.isVisible = false
+            add(previewLabel, JLayeredPane.DEFAULT_LAYER)
+            add(animationLabel, JLayeredPane.PALETTE_LAYER)
+        }
+
+        fun update(icon: Icon?, animated: Boolean) {
+            previewLabel.icon = icon
+            animationLabel.isVisible = animated
+        }
+
+        override fun doLayout() {
+            previewLabel.setBounds(0, 0, width, height)
+            val badgeIcon = animationLabel.icon
+            val badgeW = badgeIcon?.iconWidth ?: 0
+            val badgeH = badgeIcon?.iconHeight ?: 0
+            val padding = JBUI.scale(2)
+            val x = max(padding, width - badgeW - padding)
+            val y = max(padding, height - badgeH - padding)
+            animationLabel.setBounds(x, y, badgeW, badgeH)
+        }
+    }
+
+    private inner class TextureListRenderer : ListCellRenderer<TextureEntry> {
+        private val panel = JPanel(BorderLayout())
+        private val previewLayer = TexturePreviewLayer(JBUI.scale(TEXTURE_PREVIEW_SIZE))
+        private val keyLabel = JBLabel()
+        private val nameLabel = JBLabel()
+        private val metaLabel = JBLabel()
+        private val textPanel = JPanel()
+        private val contentPanel = JPanel(BorderLayout())
+
+        init {
+            panel.border = JBUI.Borders.empty(4, 6)
+            panel.add(previewLayer, BorderLayout.WEST)
+            previewLayer.border = JBUI.Borders.emptyRight(8)
+
+            keyLabel.foreground = JBColor(0x9fa3a8, 0x9fa3a8)
+            keyLabel.border = JBUI.Borders.emptyRight(8)
+            metaLabel.foreground = JBColor.GRAY
+
+            textPanel.layout = BoxLayout(textPanel, BoxLayout.Y_AXIS)
+            textPanel.isOpaque = false
+            textPanel.add(nameLabel)
+            textPanel.add(metaLabel)
+
+            contentPanel.isOpaque = false
+            contentPanel.add(keyLabel, BorderLayout.WEST)
+            contentPanel.add(textPanel, BorderLayout.CENTER)
+            panel.add(contentPanel, BorderLayout.CENTER)
+        }
+
         override fun getListCellRendererComponent(
             list: JList<out TextureEntry>,
             value: TextureEntry?,
@@ -2756,22 +3178,14 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             isSelected: Boolean,
             cellHasFocus: Boolean
         ): Component {
-            val panel = JPanel(BorderLayout())
-            panel.border = JBUI.Borders.empty(4, 6)
             panel.background = if (isSelected) JBColor(0x3b3f46, 0x3b3f46) else list.background
 
-            val nameLabel = JBLabel(value?.key ?: "")
-            val metaLabel = JBLabel(value?.value ?: "").apply {
-                foreground = JBColor.GRAY
-            }
+            keyLabel.text = value?.key.orEmpty()
+            nameLabel.text = value?.displayName.orEmpty()
+            metaLabel.text = value?.resolvedValue.orEmpty()
 
-            val textPanel = JPanel()
-            textPanel.layout = BoxLayout(textPanel, BoxLayout.Y_AXIS)
-            textPanel.isOpaque = false
-            textPanel.add(nameLabel)
-            textPanel.add(metaLabel)
-
-            panel.add(textPanel, BorderLayout.CENTER)
+            val icon = value?.previewIcon ?: AllIcons.FileTypes.Image
+            previewLayer.update(icon, value?.isAnimated == true)
             return panel
         }
     }
@@ -2822,6 +3236,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
                 val hidden = state.hiddenElements.contains(item.index)
                 eyeLabel.isVisible = true
                 eyeLabel.isEnabled = !hidden
+                eyeLabel.icon = AllIcons.General.InspectionsEye
             } else {
                 eyeLabel.isVisible = false
             }
