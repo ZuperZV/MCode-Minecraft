@@ -11,6 +11,12 @@
                 id="Block Model"
                 factoryClass="com.github.zuperzv.mcodeminecraft.toolWindow.ModelViewerToolWindowFactory"
                 anchor="right"/>
+        <toolWindow
+                id="Recipe Viewer"
+                factoryClass="com.github.zuperzv.mcodeminecraft.recipe.RecipeViewerToolWindowFactory"
+                anchor="right"/>
+        <projectActivity
+                implementation="com.github.zuperzv.mcodeminecraft.assets.MinecraftAssetPreloadActivity"/>
     </extensions>
 
     <actions>
@@ -19,6 +25,12 @@
                 class="com.github.zuperzv.mcodeminecraft.actions.PreviewModelAction"
                 text="Preview Minecraft Model">
             <add-to-group group-id="ProjectViewPopupMenu"/>
+        </action>
+        <action
+                id="ClearMinecraftPluginCaches"
+                class="com.github.zuperzv.mcodeminecraft.actions.ClearPluginCachesAction"
+                text="Clear MCode Minecraft Caches">
+            <add-to-group group-id="ToolsMenu"/>
         </action>
     </actions>
 
