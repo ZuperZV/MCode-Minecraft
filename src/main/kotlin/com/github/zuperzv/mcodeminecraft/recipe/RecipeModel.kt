@@ -36,7 +36,7 @@ enum class RecipeKind {
 data class RecipeSlotView(
     val binding: SlotBinding,
     val ingredient: IngredientSlot?,
-    val output: ItemStack?
+    val output: RecipeParser.RecipeOutput?
 )
 
 data class PositionedSlot(
@@ -67,6 +67,7 @@ sealed class SlotBinding {
     data class SingleInput(val field: String) : SlotBinding()
     data class FluidInput(val field: String) : SlotBinding()
     object Result : SlotBinding()
+    object Output : SlotBinding()
 }
 
 sealed class IngredientSelection {

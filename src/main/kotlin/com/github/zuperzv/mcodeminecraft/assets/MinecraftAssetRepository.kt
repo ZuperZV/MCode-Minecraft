@@ -4,7 +4,7 @@ import java.io.FilterInputStream
 import java.io.InputStream
 import java.nio.file.Path
 import java.util.Locale
-import java.util.jar.JarFile
+import java.util.zip.ZipFile
 
 class MinecraftAssetRepository(
     private val clientJar: Path,
@@ -38,19 +38,23 @@ class MinecraftAssetRepository(
         return openJarEntry(texture.toTextureEntryPath())
     }
 
+    fun openBlockstateStream(blockId: ResourceLocation): InputStream? {
+        return openJarEntry(blockId.toBlockstateEntryPath())
+    }
+
     private fun openJarEntry(entryPath: String): InputStream? {
-        val jar = JarFile(clientJar.toFile(), false, JarFile.OPEN_READ)
-        val entry = jar.getJarEntry(entryPath) ?: run {
-            jar.close()
+        val zip = ZipFile(clientJar.toFile())
+        val entry = zip.getEntry(entryPath) ?: run {
+            zip.close()
             return null
         }
-        val raw = jar.getInputStream(entry)
+        val raw = zip.getInputStream(entry)
         return object : FilterInputStream(raw) {
             override fun close() {
                 try {
                     super.close()
                 } finally {
-                    jar.close()
+                    zip.close()
                 }
             }
         }

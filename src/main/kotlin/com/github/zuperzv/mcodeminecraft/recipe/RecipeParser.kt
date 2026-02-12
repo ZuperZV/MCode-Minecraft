@@ -209,19 +209,36 @@ class RecipeParser {
         return IngredientChoice(itemId = item, tagId = tag)
     }
 
-    private fun parseResult(root: JsonObject): ItemStack? {
-        val result = root.get("result") ?: return null
-        return when {
-            result.isJsonPrimitive && result.asJsonPrimitive.isString ->
-                ItemStack(result.asString, 1)
-            result.isJsonObject -> {
-                val obj = result.asJsonObject
-                val id = obj.get("id")?.asString ?: obj.get("item")?.asString ?: return null
-                val count = obj.get("count")?.asInt ?: 1
-                ItemStack(id, count)
-            }
-            else -> null
+    private fun parseResult(root: JsonObject): RecipeOutput? {
+        val obj = root.get("result") ?: root.get("output") ?: return null
+
+        if (obj.isJsonPrimitive && obj.asJsonPrimitive.isString) {
+            return RecipeOutput.Item(obj.asString, 1)
         }
+
+        if (obj.isJsonObject) {
+            val json = obj.asJsonObject
+            val count = json.get("count")?.asInt ?: json.get("amount")?.asInt ?: 1
+
+            return when {
+                json.has("item") || json.has("id") -> {
+                    val id = json.get("id")?.asString ?: json.get("item")?.asString ?: return null
+                    RecipeOutput.Item(id, count)
+                }
+                json.has("fluid") -> {
+                    val fluidId = json.get("fluid").asString
+                    RecipeOutput.Fluid(fluidId, count)
+                }
+                else -> null
+            }
+        }
+
+        return null
+    }
+
+    sealed class RecipeOutput {
+        data class Item(val id: String, val count: Int) : RecipeOutput()
+        data class Fluid(val id: String, val amount: Int) : RecipeOutput()
     }
 
     private fun JsonElement.asStringOrNull(): String? {

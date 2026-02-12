@@ -34,4 +34,8 @@ data class ResourceLocation private constructor(
     fun toTextureEntryPath(): String {
         return "assets/$namespace/textures/$path.png"
     }
+
+    fun toBlockstateEntryPath(): String {
+        return "assets/$namespace/blockstates/$path.json"
+    }
 }

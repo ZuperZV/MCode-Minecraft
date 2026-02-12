@@ -10,6 +10,7 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.google.gson.JsonPrimitive
 import com.intellij.icons.AllIcons
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
@@ -35,6 +36,7 @@ import com.intellij.ui.content.ContentFactory
 import com.intellij.ui.jcef.JBCefApp
 import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.ui.treeStructure.Tree
+import com.intellij.util.concurrency.AppExecutorUtil
 import com.intellij.util.ui.JBUI
 import org.intellij.lang.annotations.Language
 import java.awt.*
@@ -45,6 +47,8 @@ import java.awt.event.MouseEvent
 import java.awt.geom.RoundRectangle2D
 import java.awt.image.BufferedImage
 import java.io.File
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 import javax.imageio.ImageIO
 import javax.swing.*
 import javax.swing.event.DocumentEvent
@@ -81,8 +85,10 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         )
 
     private val TEXTURE_PREVIEW_SIZE = 32
+    private val TEXTURE_PREFETCH_PADDING = 8
 
     private val logger = Logger.getInstance(ModelViewerToolWindowFactory::class.java)
+    private val texturePreviewExecutor = AppExecutorUtil.getAppExecutorService()
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         dumpUiManagerKeysOnce()
@@ -2042,8 +2048,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         val value: String,
         val resolvedValue: String,
         val displayName: String,
-        val previewIcon: Icon?,
-        val isAnimated: Boolean
+        val textureFile: File?
     )
 
     private enum class ElementNodeKind { ROOT, GROUP, ELEMENT }
@@ -2062,8 +2067,11 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         val model: DefaultListModel<TextureEntry>,
         val searchField: SearchTextField,
         val allEntries: MutableList<TextureEntry>,
+        val list: JBList<TextureEntry>,
+        val scrollPane: JBScrollPane,
         val previewCache: MutableMap<String, Icon?>,
-        val animationCache: MutableMap<String, Boolean>
+        val animationCache: MutableMap<String, Boolean>,
+        val loadingPreviews: MutableSet<String>
     ) {
         var lastModelPath: String? = null
     }
@@ -2147,8 +2155,9 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
     private fun createTexturesPanel(onRefresh: () -> Unit): TexturesPanelState {
         val model = DefaultListModel<TextureEntry>()
         val allEntries = mutableListOf<TextureEntry>()
-        val previewCache = mutableMapOf<String, Icon?>()
-        val animationCache = mutableMapOf<String, Boolean>()
+        val previewCache = ConcurrentHashMap<String, Icon?>()
+        val animationCache = ConcurrentHashMap<String, Boolean>()
+        val loadingPreviews = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
         val searchField = SearchTextField().apply {
             isVisible = false
@@ -2156,11 +2165,18 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             textEditor.background = BACKGROUND_COLOR
         }
 
+        lateinit var state: TexturesPanelState
+
+        val list = JBList(model).apply {
+            selectionMode = ListSelectionModel.SINGLE_SELECTION
+            background = BACKGROUND_COLOR
+        }
+        val scrollPane = JBScrollPane(list).apply { border = JBUI.Borders.emptyTop(6) }
+
         fun refreshFilter() {
             updateTextureModel(model, allEntries, searchField.text)
+            prefetchTexturePreviews(state, list, scrollPane)
         }
-
-        attachSearchFilter(searchField) { refreshFilter() }
 
         val header = createCategoryHeader(
             "TEXTURES",
@@ -2177,12 +2193,6 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             )
         )
 
-        val list = JBList(model).apply {
-            selectionMode = ListSelectionModel.SINGLE_SELECTION
-            background = BACKGROUND_COLOR
-            cellRenderer = TextureListRenderer()
-        }
-
         val headerContainer = JPanel(BorderLayout()).apply {
             isOpaque = false
             add(header, BorderLayout.NORTH)
@@ -2194,10 +2204,28 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             background = BACKGROUND_COLOR
             border = JBUI.Borders.empty(6, 6, 6, 6)
             add(headerContainer, BorderLayout.NORTH)
-            add(JBScrollPane(list).apply { border = JBUI.Borders.emptyTop(6) }, BorderLayout.CENTER)
+            add(scrollPane, BorderLayout.CENTER)
         }
 
-        return TexturesPanelState(panel, model, searchField, allEntries, previewCache, animationCache)
+        state = TexturesPanelState(
+            panel = panel,
+            model = model,
+            searchField = searchField,
+            allEntries = allEntries,
+            list = list,
+            scrollPane = scrollPane,
+            previewCache = previewCache,
+            animationCache = animationCache,
+            loadingPreviews = loadingPreviews
+        )
+        list.cellRenderer = TextureListRenderer(state, list)
+
+        attachSearchFilter(searchField) { refreshFilter() }
+        scrollPane.viewport.addChangeListener {
+            prefetchTexturePreviews(state, list, scrollPane)
+        }
+
+        return state
     }
 
     private fun createElementsPanel(
@@ -2406,6 +2434,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         state.model.clear()
         state.previewCache.clear()
         state.animationCache.clear()
+        state.loadingPreviews.clear()
         state.lastModelPath = null
     }
 
@@ -2429,6 +2458,7 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         if (activePath != state.lastModelPath) {
             state.previewCache.clear()
             state.animationCache.clear()
+            state.loadingPreviews.clear()
             state.lastModelPath = activePath
         }
         val assetsRoot = activeFile?.let { AssetRootResolver.findAssetsRoot(it) }
@@ -2445,20 +2475,18 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             val resolvedValue = resolveTextureValue(rawValue, textureMap)
             val displayName = extractTextureFileName(resolvedValue.removePrefix("#"))
             val textureFile = resolveTextureFile(assetsRoot, defaultNamespace, resolvedValue)
-            val previewIcon = loadTexturePreviewIcon(state, textureFile)
-            val isAnimated = textureFile?.let { isTextureAnimated(state, it) } ?: false
             state.allEntries.add(
                 TextureEntry(
                     key = entry.key,
                     value = rawValue,
                     resolvedValue = resolvedValue,
                     displayName = displayName,
-                    previewIcon = previewIcon,
-                    isAnimated = isAnimated
+                    textureFile = textureFile
                 )
             )
         }
         updateTextureModel(state.model, state.allEntries, state.searchField.text)
+        prefetchTexturePreviews(state, state.list, state.scrollPane)
     }
 
     private fun updateTextureModel(
@@ -2581,6 +2609,50 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         val animated = File(file.path + ".mcmeta").isFile
         state.animationCache[key] = animated
         return animated
+    }
+
+    private fun resolveTexturePreviewIcon(
+        entry: TextureEntry,
+        state: TexturesPanelState,
+        list: JList<out TextureEntry>
+    ): Icon? {
+        val file = entry.textureFile ?: return AllIcons.FileTypes.Image
+        val key = file.path
+        if (state.previewCache.containsKey(key)) {
+            return state.previewCache[key]
+        }
+        if (state.loadingPreviews.add(key)) {
+            texturePreviewExecutor.execute {
+                loadTexturePreviewIcon(state, file)
+                state.loadingPreviews.remove(key)
+                ApplicationManager.getApplication().invokeLater {
+                    list.repaint()
+                }
+            }
+        }
+        return AllIcons.FileTypes.Image
+    }
+
+    private fun prefetchTexturePreviews(
+        state: TexturesPanelState,
+        list: JBList<TextureEntry>,
+        scrollPane: JBScrollPane
+    ) {
+        val size = list.model.size
+        if (size <= 0) return
+        val viewport = scrollPane.viewport
+        val viewPos = viewport.viewPosition
+        val firstIndex = list.locationToIndex(viewPos)
+        if (firstIndex < 0) return
+        val bottom = Point(viewPos.x, viewPos.y + viewport.extentSize.height - 1)
+        val lastIndex = list.locationToIndex(bottom).takeIf { it >= 0 } ?: firstIndex
+        val start = max(0, firstIndex - TEXTURE_PREFETCH_PADDING)
+        val end = min(size - 1, lastIndex + TEXTURE_PREFETCH_PADDING)
+        if (start > end) return
+        for (i in start..end) {
+            val entry = list.model.getElementAt(i)
+            resolveTexturePreviewIcon(entry, state, list)
+        }
     }
 
     private fun scaleTexturePreview(image: BufferedImage, size: Int): BufferedImage {
@@ -3142,7 +3214,10 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
         }
     }
 
-    private inner class TextureListRenderer : ListCellRenderer<TextureEntry> {
+    private inner class TextureListRenderer(
+        private val state: TexturesPanelState,
+        private val list: JBList<TextureEntry>
+    ) : ListCellRenderer<TextureEntry> {
         private val panel = JPanel(BorderLayout())
         private val previewLayer = TexturePreviewLayer(JBUI.scale(TEXTURE_PREVIEW_SIZE))
         private val keyLabel = JBLabel()
@@ -3184,8 +3259,9 @@ class ModelViewerToolWindowFactory : ToolWindowFactory, DumbAware {
             nameLabel.text = value?.displayName.orEmpty()
             metaLabel.text = value?.resolvedValue.orEmpty()
 
-            val icon = value?.previewIcon ?: AllIcons.FileTypes.Image
-            previewLayer.update(icon, value?.isAnimated == true)
+            val icon = value?.let { resolveTexturePreviewIcon(it, state, list) } ?: AllIcons.FileTypes.Image
+            val animated = value?.textureFile?.let { isTextureAnimated(state, it) } == true
+            previewLayer.update(icon, animated)
             return panel
         }
     }

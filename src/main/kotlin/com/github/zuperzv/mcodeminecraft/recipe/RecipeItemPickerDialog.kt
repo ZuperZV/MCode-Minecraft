@@ -33,7 +33,7 @@ import javax.swing.event.DocumentListener
 class RecipeItemPickerDialog(
     private val project: Project,
     private val catalog: AssetCatalog,
-    private val iconProvider: RecipeIconProvider,
+    private val previewProvider: RecipeItemPreviewProvider,
     private val mode: SelectionMode
 ) : DialogWrapper(true) {
 
@@ -146,7 +146,7 @@ class RecipeItemPickerDialog(
         list.visibleRowCount = -1
         list.fixedCellWidth = CELL_SIZE
         list.fixedCellHeight = CELL_SIZE
-        list.cellRenderer = EntryRenderer(iconProvider)
+        list.cellRenderer = EntryRenderer(previewProvider)
         updateListModel(entries)
         list.addListSelectionListener {
             val entry = list.selectedValue
@@ -270,16 +270,11 @@ class RecipeItemPickerDialog(
         val registry = project.getService(RegistryIndexService::class.java).getIndexAsync()
             .takeIf { it.isDone && !it.isCompletedExceptionally }
             ?.getNow(null)
-        if (registry == null) {
-            result.addAll(buildEntriesFromCatalog())
-            return result
-        }
+            ?: return result
+
         val allItems = registry.items.sorted()
         val itemSet = allItems.toSet()
         val allBlocks = registry.blocks.sorted()
-        if (allItems.isEmpty() && allBlocks.isEmpty()) {
-            return buildEntriesFromCatalog()
-        }
         for (id in allItems) {
             result.add(createEntry(id, EntryKind.ITEM))
         }
@@ -303,21 +298,6 @@ class RecipeItemPickerDialog(
         return result
     }
 
-    private fun buildEntriesFromCatalog(): List<ItemEntry> {
-        val result = ArrayList<ItemEntry>()
-        val allItems = catalog.allItemIds().sorted()
-        val itemSet = allItems.toSet()
-        val allBlocks = catalog.allBlockIds().sorted()
-        for (id in allItems) {
-            result.add(createEntry(id, EntryKind.ITEM))
-        }
-        for (id in allBlocks) {
-            if (itemSet.contains(id)) continue
-            result.add(createEntry(id, EntryKind.BLOCK))
-        }
-        return result
-    }
-
     private fun createEntry(id: String, kind: EntryKind): ItemEntry {
         val name = catalog.resolveDisplayName(id) ?: id
         return ItemEntry(
@@ -331,7 +311,14 @@ class RecipeItemPickerDialog(
     private fun loadRegistryEntriesAsync() {
         val future = project.getService(RegistryIndexService::class.java).getIndexAsync()
         future.thenAccept { index ->
-            if (index == null) return@thenAccept
+            if (index == null) {
+                SwingUtilities.invokeLater {
+                    entries = mutableListOf()
+                    refresh()
+                    list.emptyText.text = "Registry unavailable. Check RegistryIndexService logs."
+                }
+                return@thenAccept
+            }
             val registryEntries = buildEntries()
             SwingUtilities.invokeLater {
                 entries = registryEntries.toMutableList()
@@ -344,7 +331,7 @@ class RecipeItemPickerDialog(
     }
 
     private class EntryRenderer(
-        private val iconProvider: RecipeIconProvider
+        private val previewProvider: RecipeItemPreviewProvider
     ) : DefaultListCellRenderer() {
         override fun getListCellRendererComponent(
             list: JList<*>,
@@ -358,7 +345,7 @@ class RecipeItemPickerDialog(
             val icon = when (entry?.kind) {
                 EntryKind.TAG -> AllIcons.Nodes.Tag
                 EntryKind.ITEM, EntryKind.BLOCK ->
-                    entry?.id?.let { iconProvider.getIcon(it) { list.repaint() } }
+                    entry?.id?.let { previewProvider.getIcon(it) { list.repaint() } }
                 else -> null
             }
             icon?.let { this.icon = it } ?: run { this.icon = null }

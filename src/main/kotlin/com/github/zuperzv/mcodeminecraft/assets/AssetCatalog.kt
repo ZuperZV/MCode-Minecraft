@@ -85,6 +85,11 @@ class AssetCatalog(
             ?: projectRepository?.openTextureStream(texture)
     }
 
+    fun openBlockstateStream(blockId: ResourceLocation): InputStream? {
+        return projectRepository?.openBlockstateStream(blockId)
+            ?: vanillaRepository?.openBlockstateStream(blockId)
+    }
+
     private fun normalizeId(id: String): String {
         return id.trim().lowercase(Locale.US)
     }

@@ -16,6 +16,10 @@ class ProjectAssetRepository(
         return openResource(texture.toTextureEntryPath())
     }
 
+    fun openBlockstateStream(blockId: ResourceLocation): InputStream? {
+        return openResource(blockId.toBlockstateEntryPath())
+    }
+
     private fun openResource(relativePath: String): InputStream? {
         for (root in resourceRoots) {
             val path = root.resolve(relativePath)

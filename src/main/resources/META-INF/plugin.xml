@@ -15,7 +15,7 @@
                 id="Recipe Viewer"
                 factoryClass="com.github.zuperzv.mcodeminecraft.recipe.RecipeViewerToolWindowFactory"
                 anchor="right"/>
-        <projectActivity
+        <startupActivity
                 implementation="com.github.zuperzv.mcodeminecraft.assets.MinecraftAssetPreloadActivity"/>
     </extensions>
 

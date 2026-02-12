@@ -31,8 +31,13 @@ class RegistryReportLoader {
         val blocks = reports.blocks?.let { loadSimpleReport(it, RegistryType.BLOCK) }.orEmpty()
         val fallback = reports.registries?.let {
             Files.newInputStream(it).use { stream ->
-                loadRegistriesJson(stream, "minecraft:item", RegistryType.ITEM) +
-                    loadRegistriesJson(stream, "minecraft:block", RegistryType.BLOCK)
+                loadRegistriesJson(
+                    stream,
+                    listOf(
+                        "minecraft:item" to RegistryType.ITEM,
+                        "minecraft:block" to RegistryType.BLOCK
+                    )
+                )
             }
         }.orEmpty()
         return combine(items, blocks, fallback)
@@ -79,25 +84,39 @@ class RegistryReportLoader {
 
     private fun loadRegistriesJson(
         stream: InputStream,
-        registryKey: String,
-        type: RegistryType
+        types: List<Pair<String, RegistryType>>
     ): List<RegistryEntry> {
+
         InputStreamReader(stream, StandardCharsets.UTF_8).use { reader ->
             val root = JsonParser.parseReader(reader)
             if (!root.isJsonObject) return emptyList()
-            val registry = root.asJsonObject.getAsJsonObject(registryKey) ?: return emptyList()
-            val entries = registry.get("entries")
-            return when {
-                entries != null && entries.isJsonObject ->
-                    entries.asJsonObject.entrySet().map { entry -> toEntry(entry.key, type) }
-                entries != null && entries.isJsonArray ->
-                    entries.asJsonArray.mapNotNull { element -> element.asStringOrNull() }
-                        .map { id -> toEntry(id, type) }
-                registry.has("values") && registry.get("values").isJsonArray ->
-                    registry.getAsJsonArray("values").mapNotNull { it.asStringOrNull() }
-                        .map { id -> toEntry(id, type) }
-                else -> emptyList()
+
+            val obj = root.asJsonObject
+            val result = ArrayList<RegistryEntry>()
+
+            types.forEach { (registryKey, type) ->
+                val registry = obj.getAsJsonObject(registryKey) ?: return@forEach
+                val entries = registry.get("entries")
+
+                when {
+                    entries != null && entries.isJsonObject ->
+                        entries.asJsonObject.entrySet().forEach { entry ->
+                            result.add(toEntry(entry.key, type))
+                        }
+
+                    entries != null && entries.isJsonArray ->
+                        entries.asJsonArray
+                            .mapNotNull { it.asStringOrNull() }
+                            .forEach { id -> result.add(toEntry(id, type)) }
+
+                    registry.has("values") && registry.get("values").isJsonArray ->
+                        registry.getAsJsonArray("values")
+                            .mapNotNull { it.asStringOrNull() }
+                            .forEach { id -> result.add(toEntry(id, type)) }
+                }
             }
+
+            return result
         }
     }
 
@@ -115,8 +134,13 @@ class RegistryReportLoader {
     private fun loadRegistriesFromSource(source: JarSource, path: String): List<RegistryEntry> {
         val entry = source.jar.getJarEntry(path) ?: return emptyList()
         source.jar.getInputStream(entry).use { stream ->
-            return loadRegistriesJson(stream, "minecraft:item", RegistryType.ITEM) +
-                loadRegistriesJson(stream, "minecraft:block", RegistryType.BLOCK)
+            return loadRegistriesJson(
+                stream,
+                listOf(
+                    "minecraft:item" to RegistryType.ITEM,
+                    "minecraft:block" to RegistryType.BLOCK
+                )
+            )
         }
     }
 
@@ -128,8 +152,15 @@ class RegistryReportLoader {
         val result = ArrayList<RegistryEntry>()
         matches.forEach { entry ->
             source.jar.getInputStream(entry).use { stream ->
-                result.addAll(loadRegistriesJson(stream, "minecraft:item", RegistryType.ITEM))
-                result.addAll(loadRegistriesJson(stream, "minecraft:block", RegistryType.BLOCK))
+                result.addAll(
+                    loadRegistriesJson(
+                        stream,
+                        listOf(
+                            "minecraft:item" to RegistryType.ITEM,
+                            "minecraft:block" to RegistryType.BLOCK
+                        )
+                    )
+                )
             }
         }
         return result

@@ -11,7 +11,8 @@ object RecipeJsonEditor {
             is SlotBinding.ShapelessInput -> updateShapeless(root, binding, selection)
             is SlotBinding.SingleInput -> updateSingle(root, binding, selection)
             is SlotBinding.FluidInput -> updateFluidInput(root, binding, selection)
-            SlotBinding.Result -> updateResult(root, selection)
+            SlotBinding.Result -> updateResult(root, "result", selection)
+            SlotBinding.Output -> updateResult(root, "output", selection)
         }
     }
 
@@ -96,14 +97,21 @@ object RecipeJsonEditor {
         }
     }
 
-    private fun updateResult(root: JsonObject, selection: IngredientSelection) {
-        if (selection !is IngredientSelection.Item) {
-            return
-        }
-        val current = root.get("result")
+    private fun updateResult(root: JsonObject, field: String, selection: IngredientSelection) {
+        if (selection !is IngredientSelection.Item) return
+
+        val current = root.get(field)
         when {
-            current == null -> root.addProperty("result", selection.id)
-            current.isJsonPrimitive && current.asJsonPrimitive.isString -> root.addProperty("result", selection.id)
+            current == null -> {
+                val obj = JsonObject()
+                obj.addProperty("item", selection.id)
+                root.add(field, obj)
+            }
+            current.isJsonPrimitive && current.asJsonPrimitive.isString -> {
+                val obj = JsonObject()
+                obj.addProperty("item", selection.id)
+                root.add(field, obj)
+            }
             current.isJsonObject -> {
                 val obj = current.asJsonObject
                 val key = when {
@@ -113,7 +121,11 @@ object RecipeJsonEditor {
                 }
                 obj.addProperty(key, selection.id)
             }
-            else -> root.addProperty("result", selection.id)
+            else -> {
+                val obj = JsonObject()
+                obj.addProperty("item", selection.id)
+                root.add(field, obj)
+            }
         }
     }
 

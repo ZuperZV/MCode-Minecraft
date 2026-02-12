@@ -9,7 +9,7 @@ class SlotClickHandler(
     private val project: Project,
     private val binding: SlotBinding,
     private val catalog: AssetCatalog,
-    private val iconProvider: RecipeIconProvider,
+    private val previewProvider: RecipeItemPreviewProvider,
     private val isOutput: Boolean
 ) : MouseAdapter() {
     override fun mouseClicked(e: MouseEvent) {
@@ -21,7 +21,7 @@ class SlotClickHandler(
         } else {
             RecipeItemPickerDialog.SelectionMode.ITEM_OR_TAG
         }
-        val dialog = RecipeItemPickerDialog(project, catalog, iconProvider, mode)
+        val dialog = RecipeItemPickerDialog(project, catalog, previewProvider, mode)
         if (!dialog.showAndGet()) {
             return
         }
