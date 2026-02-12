@@ -285,4 +285,75 @@ class RegistryReportLoader {
         }
         return map.values.toList()
     }
+
+    fun loadFromProjectResources(resourceRoots: List<Path>): List<RegistryEntry> {
+        val result = LinkedHashMap<String, RegistryEntry>()
+
+        resourceRoots.forEach { root ->
+            if (!Files.exists(root)) return@forEach
+
+            // assets/<modid>/models/item
+            val assetsDir = root.resolve("assets")
+            if (Files.exists(assetsDir)) {
+                Files.list(assetsDir).use { namespaces ->
+                    namespaces.filter { Files.isDirectory(it) }.forEach { nsDir ->
+                        val namespace = nsDir.fileName.toString().lowercase(locale)
+
+                        // ITEMS
+                        val itemModels = nsDir.resolve("models/item")
+                        if (Files.exists(itemModels)) {
+                            Files.walk(itemModels).use { files ->
+                                files.filter { it.toString().endsWith(".json") }.forEach { file ->
+                                    val name = itemModels.relativize(file).toString()
+                                        .removeSuffix(".json")
+                                        .replace("\\", "/")
+                                    val id = "$namespace:$name"
+                                    val entry = RegistryEntry(id, namespace, name, RegistryType.ITEM)
+                                    result.putIfAbsent("ITEM:$id", entry)
+                                }
+                            }
+                        }
+
+                        // BLOCKS
+                        val blockStates = nsDir.resolve("blockstates")
+                        if (Files.exists(blockStates)) {
+                            Files.walk(blockStates).use { files ->
+                                files.filter { it.toString().endsWith(".json") }.forEach { file ->
+                                    val name = blockStates.relativize(file).toString()
+                                        .removeSuffix(".json")
+                                        .replace("\\", "/")
+                                    val id = "$namespace:$name"
+                                    val entry = RegistryEntry(id, namespace, name, RegistryType.BLOCK)
+                                    result.putIfAbsent("BLOCK:$id", entry)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Fallback
+            val dataDir = root.resolve("data")
+            if (Files.exists(dataDir)) {
+                Files.walk(dataDir).use { paths ->
+                    paths.filter { it.toString().endsWith(".json") && it.toString().contains("/tags/") }
+                        .forEach { file ->
+                            val tagId = toTagId(file.toString().replace("\\", "/")) ?: return@forEach
+                            val values = Files.newInputStream(file).use { readTagValues(it) }
+                            values.forEach { id ->
+                                val type = when {
+                                    file.toString().contains("/items/") || file.toString().contains("/item/") -> RegistryType.ITEM
+                                    file.toString().contains("/blocks/") || file.toString().contains("/block/") -> RegistryType.BLOCK
+                                    else -> return@forEach
+                                }
+                                val entry = toEntry(id, type)
+                                result.putIfAbsent("${type}:${entry.id}", entry)
+                            }
+                        }
+                }
+            }
+        }
+
+        return result.values.toList()
+    }
 }

@@ -3,9 +3,12 @@ package com.github.zuperzv.mcodeminecraft.registry
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.roots.ModuleRootManager
 import com.intellij.util.concurrency.AppExecutorUtil
 import java.nio.file.Path
+import java.nio.file.Paths
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 
@@ -49,34 +52,64 @@ class RegistryIndexService(private val project: Project) {
     }
 
     private fun buildIndex(version: String): RegistryIndex {
+
+        val resourceRoots = findResourceRoots()
+        val projectEntries = loader.loadFromProjectResources(resourceRoots)
+        logger.warn("RegistryIndexService: project entries=${projectEntries.size}")
+
         val generated = envDetector.findGeneratedReports(project)
         if (generated != null) {
             logger.warn("RegistryIndexService: using generated reports")
             val entries = loader.loadFromGeneratedReports(generated)
-            logger.warn("RegistryIndexService: generated entries=${entries.size}")
-            return toIndex(version, entries)
+
+            val merged = entries + projectEntries
+            logger.warn("RegistryIndexService: generated entries=${entries.size} merged=${merged.size}")
+
+            return toIndex(version, merged)
         }
 
         val clientJar = downloader.getClientJar(version)
         val serverJar = downloader.getServerJar(version)
+
         logger.warn("RegistryIndexService: client jar=$clientJar")
         logger.warn("RegistryIndexService: server jar=$serverJar")
 
         val fromServer = loader.loadFromJarReports(serverJar)
         if (fromServer.isNotEmpty()) {
-            logger.warn("RegistryIndexService: server reports entries=${fromServer.size}")
-            return toIndex(version, fromServer)
+            val merged = fromServer + projectEntries
+            logger.warn("RegistryIndexService: server reports entries=${fromServer.size} merged=${merged.size}")
+            return toIndex(version, merged)
         }
 
         val fromClient = loader.loadFromJarReports(clientJar)
         if (fromClient.isNotEmpty()) {
-            logger.warn("RegistryIndexService: client reports entries=${fromClient.size}")
-            return toIndex(version, fromClient)
+            val merged = fromClient + projectEntries
+            logger.warn("RegistryIndexService: client reports entries=${fromClient.size} merged=${merged.size}")
+            return toIndex(version, merged)
         }
 
         val fallback = loader.loadFallbackRegistries(serverJar)
-        logger.warn("RegistryIndexService: fallback registry entries=${fallback.size}")
-        return toIndex(version, fallback)
+        val merged = fallback + projectEntries
+        logger.warn("RegistryIndexService: fallback registry entries=${fallback.size} merged=${merged.size}")
+
+        return toIndex(version, merged)
+    }
+
+    private fun findResourceRoots(): List<Path> {
+        val result = ArrayList<Path>()
+
+        val modules = ModuleManager.getInstance(project).modules
+        modules.forEach { module ->
+            val roots = ModuleRootManager.getInstance(module).sourceRoots
+            roots.forEach { root ->
+                val path = Paths.get(root.path)
+                if (path.toString().contains("resources")) {
+                    result.add(path)
+                }
+            }
+        }
+
+        return result
     }
 
     private fun toIndex(version: String, entries: List<RegistryEntry>): RegistryIndex {

@@ -23,7 +23,7 @@ class MinecraftAssetIndexService(private val project: Project) {
     }
 
     fun getRepositoryAsync(): CompletableFuture<MinecraftAssetRepository?> {
-        val version = detector.detect(project)
+        val version = detector.detect(project, "minecraft_version")
         if (version.isNullOrBlank()) {
             return CompletableFuture.completedFuture(null)
         }
