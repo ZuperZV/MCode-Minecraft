@@ -10,6 +10,7 @@ class MinecraftAssetRepository(
     private val clientJar: Path,
     val index: MinecraftAssetIndex
 ) : MinecraftAssetLookup {
+
     override fun getModelForId(id: String): ResourceLocation? {
         return index.modelsById[normalizeId(id)]
     }

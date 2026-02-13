@@ -51,6 +51,26 @@ class RegistryIndexService(private val project: Project) {
         cached.clear()
     }
 
+    fun getServerJarPath(): Path? {
+        val version = versionResolver.resolve(project) ?: return null
+        return try {
+            downloader.getServerJar(version)
+        } catch (e: Exception) {
+            logger.warn("Failed to obtain server jar for $version", e)
+            null
+        }
+    }
+
+    fun getClientJarPath(): Path? {
+        val version = versionResolver.resolve(project) ?: return null
+        return try {
+            downloader.getClientJar(version)
+        } catch (e: Exception) {
+            logger.warn("Failed to obtain client jar for $version", e)
+            null
+        }
+    }
+
     private fun buildIndex(version: String): RegistryIndex {
 
         val resourceRoots = findResourceRoots()

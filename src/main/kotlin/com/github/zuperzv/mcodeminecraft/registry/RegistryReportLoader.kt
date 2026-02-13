@@ -20,7 +20,8 @@ data class RegistryEntry(
 
 enum class RegistryType {
     ITEM,
-    BLOCK
+    BLOCK,
+    FLUID
 }
 
 class RegistryReportLoader {
@@ -35,7 +36,8 @@ class RegistryReportLoader {
                     stream,
                     listOf(
                         "minecraft:item" to RegistryType.ITEM,
-                        "minecraft:block" to RegistryType.BLOCK
+                        "minecraft:block" to RegistryType.BLOCK,
+                        "minecraft:fluid" to RegistryType.FLUID
                     )
                 )
             }
@@ -64,6 +66,7 @@ class RegistryReportLoader {
                 result.addAll(loadRegistriesJsonFromData(source))
                 result.addAll(loadEntriesFromTags(source, RegistryType.ITEM))
                 result.addAll(loadEntriesFromTags(source, RegistryType.BLOCK))
+                result.addAll(loadEntriesFromTags(source, RegistryType.FLUID))
             }
             result
         }
@@ -170,17 +173,21 @@ class RegistryReportLoader {
         val prefixes = when (type) {
             RegistryType.ITEM -> listOf("/tags/item/", "/tags/items/")
             RegistryType.BLOCK -> listOf("/tags/block/", "/tags/blocks/")
+            RegistryType.FLUID -> listOf("/tags/fluid/", "/tags/fluids/")
         }
+
         val tagFiles = source.jar.entries().asSequence()
             .filter { entry ->
                 entry.name.startsWith("data/") &&
-                    entry.name.endsWith(".json") &&
-                    prefixes.any { entry.name.contains(it) }
+                        entry.name.endsWith(".json") &&
+                        prefixes.any { entry.name.contains(it) }
             }
             .toList()
+
         if (tagFiles.isEmpty()) return emptyList()
 
         val tagValues = HashMap<String, List<String>>()
+
         tagFiles.forEach { entry ->
             val tagId = toTagId(entry.name) ?: return@forEach
             source.jar.getInputStream(entry).use { stream ->
@@ -190,6 +197,7 @@ class RegistryReportLoader {
                 }
             }
         }
+
         if (tagValues.isEmpty()) return emptyList()
 
         val resolved = HashSet<String>()
@@ -208,6 +216,7 @@ class RegistryReportLoader {
         }
 
         tagValues.keys.forEach { resolveTag(it) }
+
         return resolved.map { id -> toEntry(id, type) }
     }
 
@@ -280,9 +289,10 @@ class RegistryReportLoader {
         fallback: List<RegistryEntry>
     ): List<RegistryEntry> {
         val map = LinkedHashMap<String, RegistryEntry>()
-        (items + blocks + fallback).forEach { entry ->
+        (blocks + items + fallback).forEach { entry ->
             map.putIfAbsent("${entry.type}:${entry.id}", entry)
         }
+
         return map.values.toList()
     }
 
@@ -299,21 +309,6 @@ class RegistryReportLoader {
                     namespaces.filter { Files.isDirectory(it) }.forEach { nsDir ->
                         val namespace = nsDir.fileName.toString().lowercase(locale)
 
-                        // ITEMS
-                        val itemModels = nsDir.resolve("models/item")
-                        if (Files.exists(itemModels)) {
-                            Files.walk(itemModels).use { files ->
-                                files.filter { it.toString().endsWith(".json") }.forEach { file ->
-                                    val name = itemModels.relativize(file).toString()
-                                        .removeSuffix(".json")
-                                        .replace("\\", "/")
-                                    val id = "$namespace:$name"
-                                    val entry = RegistryEntry(id, namespace, name, RegistryType.ITEM)
-                                    result.putIfAbsent("ITEM:$id", entry)
-                                }
-                            }
-                        }
-
                         // BLOCKS
                         val blockStates = nsDir.resolve("blockstates")
                         if (Files.exists(blockStates)) {
@@ -325,6 +320,51 @@ class RegistryReportLoader {
                                     val id = "$namespace:$name"
                                     val entry = RegistryEntry(id, namespace, name, RegistryType.BLOCK)
                                     result.putIfAbsent("BLOCK:$id", entry)
+                                }
+                            }
+                        }
+
+                        val itemModels = nsDir.resolve("models/item")
+                        if (Files.exists(itemModels)) {
+                            Files.walk(itemModels).use { files ->
+                                files.filter { it.toString().endsWith(".json") }.forEach { file ->
+
+                                    val isBlockItem = Files.newInputStream(file).use { stream ->
+                                        InputStreamReader(stream, StandardCharsets.UTF_8).use { reader ->
+                                            val json = JsonParser.parseReader(reader)
+                                            if (!json.isJsonObject) return@use false
+                                            val obj = json.asJsonObject
+                                            val parent = obj.get("parent")?.asString ?: return@use false
+
+                                            parent.contains(":block/") || parent.startsWith("minecraft:block/")
+                                        }
+                                    }
+
+                                    if (isBlockItem) return@forEach
+
+                                    val name = itemModels.relativize(file).toString()
+                                        .removeSuffix(".json")
+                                        .replace("\\", "/")
+
+                                    val id = "$namespace:$name"
+                                    val entry = RegistryEntry(id, namespace, name, RegistryType.ITEM)
+                                    result.putIfAbsent("ITEM:$id", entry)
+                                }
+                            }
+                        }
+
+                        // FLUIDS
+                        val fluidTextures = nsDir.resolve("textures/fluid")
+                        if (Files.exists(fluidTextures)) {
+                            Files.walk(fluidTextures).use { files ->
+                                files.filter { it.toString().endsWith(".png") }.forEach { file ->
+                                    val name = fluidTextures.relativize(file).toString()
+                                        .removeSuffix(".png")
+                                        .replace("\\", "/")
+
+                                    val id = "$namespace:$name"
+                                    val entry = RegistryEntry(id, namespace, name, RegistryType.FLUID)
+                                    result.putIfAbsent("FLUID:$id", entry)
                                 }
                             }
                         }
@@ -340,12 +380,16 @@ class RegistryReportLoader {
                         .forEach { file ->
                             val tagId = toTagId(file.toString().replace("\\", "/")) ?: return@forEach
                             val values = Files.newInputStream(file).use { readTagValues(it) }
+                            System.out.println("Fallback Text: true");
                             values.forEach { id ->
+                                val normalized = file.toString().replace("\\", "/")
+
                                 val type = when {
-                                    file.toString().contains("/items/") || file.toString().contains("/item/") -> RegistryType.ITEM
-                                    file.toString().contains("/blocks/") || file.toString().contains("/block/") -> RegistryType.BLOCK
+                                    normalized.contains("/tags/items/") || normalized.contains("/tags/item/") -> RegistryType.ITEM
+                                    normalized.contains("/tags/blocks/") || normalized.contains("/tags/block/") -> RegistryType.BLOCK
                                     else -> return@forEach
                                 }
+
                                 val entry = toEntry(id, type)
                                 result.putIfAbsent("${type}:${entry.id}", entry)
                             }

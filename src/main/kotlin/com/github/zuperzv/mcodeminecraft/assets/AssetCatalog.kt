@@ -53,8 +53,35 @@ class AssetCatalog(
 
     fun resolveDisplayName(id: String): String? {
         val normalized = normalizeId(id)
-        return projectIndex?.displayNames?.get(normalized)
-            ?: vanillaIndex?.displayNames?.get(normalized)
+
+        projectIndex?.displayNames?.get(normalized)?.let { return it }
+        vanillaIndex?.displayNames?.get(normalized)?.let { return it }
+
+        val prefixes = listOf("source_", "flowing_")
+        val suffixes = listOf("_source", "_flowing")
+
+        val candidates = mutableSetOf<String>()
+        candidates.add(normalized)
+        for (prefix in prefixes) {
+            if (normalized.startsWith(prefix)) candidates.add(normalized.removePrefix(prefix))
+        }
+        for (suffix in suffixes) {
+            if (normalized.endsWith(suffix)) candidates.add(normalized.removeSuffix(suffix))
+        }
+        for (prefix in prefixes) {
+            for (suffix in suffixes) {
+                if (normalized.startsWith(prefix) && normalized.endsWith(suffix)) {
+                    candidates.add(normalized.removePrefix(prefix).removeSuffix(suffix))
+                }
+            }
+        }
+
+        for (candidate in candidates) {
+            projectIndex?.displayNames?.get(candidate)?.let { return it }
+            vanillaIndex?.displayNames?.get(candidate)?.let { return it }
+        }
+
+        return null
     }
 
     fun resolveModel(id: String): ResourceLocation? {

@@ -15,7 +15,7 @@ class FluidSlotClickHandler(
         if (e.button != MouseEvent.BUTTON1 || e.clickCount != 1) {
             return
         }
-        val dialog = RecipeFluidPickerDialog(catalog, iconProvider)
+        val dialog = RecipeFluidPickerDialog(project, catalog, iconProvider)
         if (!dialog.showAndGet()) {
             return
         }

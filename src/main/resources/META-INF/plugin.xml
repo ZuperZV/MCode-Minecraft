@@ -4,6 +4,7 @@
     <name>MCode-Minecraft</name>
     <vendor>zuperzv</vendor>
 
+    <depends>com.intellij.modules.java</depends>
     <depends>com.intellij.modules.platform</depends>
 
     <extensions defaultExtensionNs="com.intellij">
@@ -17,6 +18,7 @@
                 anchor="right"/>
         <startupActivity
                 implementation="com.github.zuperzv.mcodeminecraft.assets.MinecraftAssetPreloadActivity"/>
+
     </extensions>
 
     <actions>

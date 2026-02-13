@@ -1,7 +1,9 @@
 package com.github.zuperzv.mcodeminecraft.recipe
 
 import com.github.zuperzv.mcodeminecraft.assets.AssetCatalog
+import com.github.zuperzv.mcodeminecraft.registry.FluidScanner
 import com.intellij.icons.AllIcons
+import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList
@@ -10,23 +12,28 @@ import com.intellij.ui.components.JBTextField
 import java.awt.BorderLayout
 import java.awt.Component
 import java.awt.Dimension
+import java.awt.FlowLayout
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
+import java.nio.file.Files
+import javax.swing.ButtonGroup
 import javax.swing.DefaultListCellRenderer
 import javax.swing.DefaultListModel
 import javax.swing.JComponent
 import javax.swing.JList
 import javax.swing.JPanel
+import javax.swing.JToggleButton
 import javax.swing.ListSelectionModel
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
 
 class RecipeFluidPickerDialog(
+    private val project: Project,
     private val catalog: AssetCatalog,
-    private val iconProvider: RecipeIconProvider
+    private val iconProvider: RecipeIconProvider,
 ) : DialogWrapper(true) {
 
     data class FluidEntry(
@@ -35,6 +42,11 @@ class RecipeFluidPickerDialog(
         val searchKey: String,
         val iconId: String?
     )
+
+    private val filterAll = JToggleButton("All")
+    private val filterSource = JToggleButton("Sources")
+    private val filterFlowing = JToggleButton("Flowing")
+
 
     private val entries = buildEntries()
     private val listModel = DefaultListModel<FluidEntry>()
@@ -114,19 +126,39 @@ class RecipeFluidPickerDialog(
     }
 
     private fun initFilters() {
+        val group = ButtonGroup()
+        group.add(filterAll)
+        group.add(filterSource)
+        group.add(filterFlowing)
+        filterAll.isSelected = true
+
         val listener = object : DocumentListener {
             override fun insertUpdate(e: DocumentEvent?) = refresh()
             override fun removeUpdate(e: DocumentEvent?) = refresh()
             override fun changedUpdate(e: DocumentEvent?) = refresh()
         }
         filterField.document.addDocumentListener(listener)
+
+        filterAll.addActionListener { refresh() }
+        filterSource.addActionListener { refresh() }
+        filterFlowing.addActionListener { refresh() }
     }
 
     private fun refresh() {
         val query = filterField.text.trim().lowercase()
+
         val filtered = entries.filter { entry ->
-            query.isEmpty() || entry.searchKey.contains(query)
+
+            val typeMatch =
+                when {
+                    filterSource.isSelected -> !entry.id.contains("flowing")
+                    filterFlowing.isSelected -> entry.id.contains("flowing")
+                    else -> true
+                }
+
+            typeMatch && (query.isEmpty() || entry.searchKey.contains(query))
         }
+
         updateListModel(filtered)
     }
 
@@ -141,6 +173,7 @@ class RecipeFluidPickerDialog(
             fill = GridBagConstraints.HORIZONTAL
             insets = Insets(4, 4, 4, 4)
         }
+
         gbc.gridx = 0
         gbc.gridy = 0
         panel.add(JBLabel("Name:"), gbc)
@@ -156,6 +189,18 @@ class RecipeFluidPickerDialog(
         gbc.gridx = 1
         gbc.weightx = 1.0
         panel.add(filterField, gbc)
+
+        gbc.gridx = 2
+        gbc.weightx = 0.0
+        panel.add(createFilterButtons(), gbc)
+        return panel
+    }
+
+    private fun createFilterButtons(): JComponent {
+        val panel = JPanel(FlowLayout(FlowLayout.LEFT, 4, 0))
+        panel.add(filterAll)
+        panel.add(filterSource)
+        panel.add(filterFlowing)
         return panel
     }
 
@@ -169,10 +214,16 @@ class RecipeFluidPickerDialog(
 
     private fun buildEntries(): List<FluidEntry> {
         val result = ArrayList<FluidEntry>()
-        val allFluids = catalog.allFluidIds().sorted()
-        for (id in allFluids) {
+
+        val scanner = project.getService(FluidScanner::class.java)
+        val fluids = scanner.findAllFluids()
+
+        for ((id, _) in fluids) {
+            System.out.println("Fluid: " + fluids);
+
             val name = catalog.resolveDisplayName(id) ?: id
             val iconId = resolveFluidIconId(id)
+
             result.add(
                 FluidEntry(
                     id = id,
@@ -182,6 +233,8 @@ class RecipeFluidPickerDialog(
                 )
             )
         }
+
+        result.sortBy { it.id }
         return result
     }
 
